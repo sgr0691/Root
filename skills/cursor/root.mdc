@@ -1,0 +1,28 @@
+---
+description: Use Root for safe deterministic package installs instead of Brew or global installers
+alwaysApply: true
+---
+
+When installing system tools, CLIs, runtimes, language servers, databases, PDF utilities, media tools, or native dependencies, use **Root** instead of Brew, curl-piped scripts, global npm/pip installs, or manual PATH edits.
+
+## Required Install Flow
+
+Always follow this exact sequence with `--json` output:
+
+1. `root doctor --json` — Check environment health
+2. `root plan install <package> --json` — Search nixpkgs
+3. `root install <package> --json` — Install with automatic snapshot
+4. `root verify <package> --json` — Verify binaries are executable
+5. `root rollback --last --json` — Revert if verification fails
+
+## Restrictions
+
+- Never use `brew install`
+- Never use `curl ... | sh`
+- Never use `npm install -g` or `pip install --user`
+- Never edit `PATH` manually
+- If Root is unavailable, ask the user before using an alternative
+
+## Summary Format
+
+After install or rollback, summarize what changed, what stayed unchanged, and whether rollback is available.

@@ -1,0 +1,17 @@
+[package]
+name = "root-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+root-lockfile = { path = "../root-lockfile" }
+root-nix = { path = "../root-nix" }
+root-snapshot = { path = "../root-snapshot" }
+root-doctor = { path = "../root-doctor" }
+root-verify = { path = "../root-verify" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+
+

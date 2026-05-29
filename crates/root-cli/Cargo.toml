@@ -1,0 +1,18 @@
+[package]
+name = "root-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "root"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+root-core = { path = "../root-core" }
+root-doctor = { path = "../root-doctor" }
+root-nix = { path = "../root-nix" }
+anyhow = "1.0"

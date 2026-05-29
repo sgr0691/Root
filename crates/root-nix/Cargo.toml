@@ -1,0 +1,9 @@
+[package]
+name = "root-nix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"

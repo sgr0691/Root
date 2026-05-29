@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "platform": "aarch64-darwin",
+  "nixpkgs": {
+    "rev": "8a053bc225586616016e3ea86407dd29de8071dd",
+    "source": "github:NixOS/nixpkgs"
+  },
+  "packages": [
+    {
+      "name": "poppler",
+      "requested": "poppler",
+      "version": "24.08.0",
+      "attribute": "poppler",
+      "storePath": "/nix/store/1b2c3d4e5f-poppler-24.08.0",
+      "binaries": ["pdftotext", "pdfinfo"]
+    }
+  ]
+}

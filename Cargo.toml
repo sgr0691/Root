@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/root-cli",
+    "crates/root-core",
+    "crates/root-nix",
+    "crates/root-lockfile",
+    "crates/root-snapshot",
+    "crates/root-doctor",
+    "crates/root-verify",
+    "crates/root-agent"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Root Contributors"]
