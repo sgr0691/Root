@@ -17,7 +17,7 @@ Or install via Homebrew:
 
 ```bash
 brew tap sgr0691/root
-brew install root
+brew install root-cli
 ```
 
 ## Quick Start
