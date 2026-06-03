@@ -82,6 +82,19 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                     });
                 }
             }
+
+            // Specifically check the default profile subdirectory
+            let default_profile = root_dir.join("profiles").join("default");
+            if !default_profile.exists() || !default_profile.is_dir() {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "Repository".to_string(),
+                    description:
+                        "Root managed profile directory (~/.root/profiles/default) is missing."
+                            .to_string(),
+                    suggestion: "Run `root init` to recreate the profile directory.".to_string(),
+                });
+            }
         } else {
             report.issues.push(DoctorIssue {
                 severity: IssueSeverity::Error,

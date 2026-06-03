@@ -6,4 +6,5 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1.0"
+dirs = "5.0"
 thiserror = "1.0"

@@ -1,8 +1,9 @@
-# Root
+# Root v0.1
 
-> The package manager AI agents are allowed to use.
+> A Nix-backed trust demo for safe installs, history, and rollback.
 
-A safer Brew for developers and AI coding agents, powered by Nix with no Nix knowledge required.
+Root installs developer CLI tools through Nix, records what changed, and lets you
+undo it — without needing to learn Nix.
 
 [![CI](https://github.com/sgr0691/Root/actions/workflows/ci.yml/badge.svg)](https://github.com/sgr0691/Root/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -13,100 +14,94 @@ A safer Brew for developers and AI coding agents, powered by Nix with no Nix kno
 curl -fsSL https://raw.githubusercontent.com/sgr0691/Root/main/scripts/install.sh | sh
 ```
 
-Or install via Homebrew:
+## Quick Start (v0.1 — trust demo)
 
 ```bash
-brew tap sgr0691/root
-brew install root-cli
+root doctor
+root install ffmpeg
+root history
+root rollback
+root history
 ```
 
-## Quick Start
-
-1. `root init`
-2. `root plan install poppler`
-3. `root install poppler`
-4. `root verify poppler`
-5. `root history`
-6. `root rollback --last`
-
-## Core Commands
+## Core Commands (v0.1)
 
 | Command | Description |
-|---|---|
-| `root init` | Initialize Root directory structure |
-| `root plan install <pkg>` | Search for a package to install |
-| `root install <pkg>` | Install a package |
-| `root remove <pkg>` | Remove a package |
-| `root list` | List managed packages |
-| `root history` | Show snapshot history |
-| `root rollback --last` | Rollback to the previous state |
-| `root doctor` | Check system health and drift |
-| `root verify <pkg>` | Verify an installed package's binaries are executable |
-| `root import <source>` | Import packages from other package managers (e.g., brew) |
-| `root lock` | Regenerate root.lock from current state |
-| `root sync` | Reconcile Nix profile with root.lock |
+|---------|-------------|
+| `root doctor` | Check that Root and Nix are ready |
+| `root install ffmpeg` | Install `ffmpeg` via Nix with snapshot |
+| `root history` | Show the event ledger |
+| `root rollback` | Undo the last Root-managed change |
 
-## JSON Output
+Only `ffmpeg` is officially supported in v0.1.
 
-Every command supports `--json` for machine-readable output, perfect for AI agent integration and scripting.
+## How It Works
 
-```bash
-root install poppler --json
-root doctor --json
-```
+Root manages an isolated Nix profile at `~/.root/profiles/default` — it never
+touches your default Nix or Homebrew profiles.
 
-## Agent Skills
+Every `root install` and `root rollback` creates a snapshot first. The event
+ledger at `~/.root/events.jsonl` records every operation.
 
-Pre-built agent skill packs are available in the `skills/` directory for:
+## Limitations (v0.1)
 
-- **Codex** — `skills/codex/AGENTS.md`
-- **Claude** — `skills/claude/SKILL.md`
-- **Cursor** — `skills/cursor/root.mdc`
-- **Generic** — `skills/generic/ROOT_AGENT_PROTOCOL.md`
+- **Only `ffmpeg` is supported.** Installing any other package is rejected with a
+  clear message.
+- **Rollback applies only to Root-managed packages.** Root cannot undo changes
+  made by Homebrew, manual installs, or other tools.
+- **Version tracking uses `"latest"`.** Root does not yet resolve and lock exact
+  Nix derivation versions.
+- **Stale lockfiles.** If Root crashes during a mutation, delete `~/.root/root.lockfile`
+  manually to recover.
+- **macOS only.** Apple Silicon and Intel are supported. Linux is detected but not
+  officially supported. Windows is not available.
 
-These skills teach AI agents to use Root instead of Brew or global installers, following the safe install protocol.
+## Experimental Commands
+
+The CLI includes additional commands that are **not part of the v0.1 public
+surface**. They may change, break, or be removed without notice:
+
+| Command | Status |
+|---------|--------|
+| `root init` | Experimental |
+| `root plan install <pkg>` | Experimental |
+| `root remove <pkg>` | Experimental |
+| `root list` | Experimental |
+| `root verify <pkg>` | Experimental |
+| `root lock` / `root sync` | Experimental |
+| `root import brew` | Experimental |
+| `--json` on all commands | Experimental |
+
+These exist for development and early testing. Do not rely on them for
+production use.
+
+## Roadmap
+
+- **v0.2** — More golden packages (ripgrep, jq, poppler, imagemagick)
+- **v0.3** — Agent skill packs for Codex, Claude, and Cursor
+- **v0.4** — Full-lockfile determinism, version pinning
+- **v0.5** — Linux support (platform detection already in place)
+- **Future** — Permissions, sandboxes, project environments, menu bar app
+
+See [Docs](Docs/) for the full plan.
 
 ## Safety
 
-- **Snapshots before every mutation** — Root automatically saves state before installing or removing packages.
-- **Rollback available** — Revert to a previous snapshot with a single command.
-- **Deterministic via Nix** — Exact versions are locked and reproducible.
-- **No global PATH pollution** — Root manages its own profile without overwriting your shell configuration.
-
-## Demo
-
-1. Start with a Mac that has Node, Ruby, Python, and Postgres installed.
-2. Run `root init`.
-3. Run `root install poppler`.
-4. Show Root's impact report.
-5. Confirm unrelated tools did not change.
-6. Run `root history`.
-7. Run `root rollback --last`.
-8. Show poppler removed and previous state restored.
-9. Run Codex/Claude/Cursor with Root skill instructions.
-10. Agent detects a missing tool and uses Root safely.
+- Snapshots before every mutation
+- Rollback is available after every install
+- Nix profile isolation — no global PATH pollution
+- Structured event ledger — every change is recorded
+- All Nix operations target `~/.root/profiles/default`, not the user profile
 
 ## Development
 
-Root v0.1 is the MVP release. See [Core Docs](Docs/Core/) for the full plan.
+```bash
+cargo build
+cargo test --all
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
 
-### v0.1 MVP
+## License
 
-| Feature | Status |
-|---|---|
-| `root init` / `root install` / `root remove` / `root list` | ✅ |
-| `root lock` / `root sync` | ✅ |
-| `root history` / `root rollback --last` | ✅ |
-| `root doctor` / `root verify` | ✅ |
-| `root plan install` | ✅ |
-| `root import brew` | ✅ |
-| `--json` all commands | ✅ |
-| Snapshots before every mutation | ✅ |
-| Agent skill packs (Claude, Codex, Cursor) | ✅ |
-| Nix adapter with mock tests | ✅ |
-
-### Post-MVP
-
-- `root shell` — project environments
-- Menu bar app — drift status, snapshot timeline, rollback
-- Agent permissions — install approvals, allow/deny lists, audit log
+Apache 2.0

@@ -118,6 +118,8 @@ pub fn init_root_dir() -> Result<PathBuf> {
     fs::create_dir_all(root_dir.join("snapshots"))
         .context("Failed to create snapshots directory")?;
     fs::create_dir_all(root_dir.join("profiles")).context("Failed to create profiles directory")?;
+    fs::create_dir_all(root_dir.join("profiles").join("default"))
+        .context("Failed to create default profile directory")?;
     fs::create_dir_all(root_dir.join("logs")).context("Failed to create logs directory")?;
     fs::create_dir_all(root_dir.join("cache")).context("Failed to create cache directory")?;
     Ok(root_dir)
@@ -148,6 +150,23 @@ pub fn derive_store_path(name: &str, version: &str) -> String {
     let hash = compute_sha256(input.as_bytes());
     let short_hash = &hash[..10];
     format!("/nix/store/{}-{}-{}", short_hash, name, version)
+}
+
+/// Detect the current platform string for the lockfile.
+/// Returns an error if the platform is unsupported.
+pub fn detect_platform() -> Result<String> {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    match (os, arch) {
+        ("macos", "aarch64") => Ok("aarch64-darwin".to_string()),
+        ("macos", "x86_64") => Ok("x86_64-darwin".to_string()),
+        ("linux", "aarch64") => Ok("aarch64-linux".to_string()),
+        ("linux", "x86_64") => Ok("x86_64-linux".to_string()),
+        (os, arch) => Err(anyhow::anyhow!(
+            "Unsupported platform: {}-{}. Root v0.1 supports macOS (Apple Silicon and Intel) and Linux (aarch64 and x86_64).",
+            os, arch
+        )),
+    }
 }
 
 /// Compute a content hash for the packages in a RootLock (sorted for determinism).

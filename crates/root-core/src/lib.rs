@@ -3,9 +3,67 @@ use root_lockfile::{get_root_dir, LockedPackage, NixpkgsConfig, RootLock, Rootfi
 use root_nix::NixAdapter;
 use root_snapshot::{list_snapshots, Snapshot};
 use serde::Serialize;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageSpec {
+    pub name: &'static str,
+    pub nix_attr: &'static str,
+    pub binary: &'static str,
+    pub verify_args: &'static [&'static str],
+}
+
+pub const SUPPORTED_PACKAGES: &[PackageSpec] = &[PackageSpec {
+    name: "ffmpeg",
+    nix_attr: "nixpkgs#ffmpeg",
+    binary: "ffmpeg",
+    verify_args: &["-version"],
+}];
+
+fn resolve_package(name: &str) -> Option<&'static PackageSpec> {
+    SUPPORTED_PACKAGES.iter().find(|p| p.name == name)
+}
+
+/// A simple file-based mutex guard for mutation commands.
+/// Acquires the lock by atomically creating `~/.root/root.lockfile`.
+/// Released on Drop.
+struct MutationGuard {
+    lock_path: PathBuf,
+}
+
+impl MutationGuard {
+    fn acquire() -> anyhow::Result<Self> {
+        let dir = root_lockfile::init_root_dir()?;
+        let lock_path = dir.join("root.lockfile");
+
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    anyhow::anyhow!(
+                        "Another Root mutation is in progress.\n\
+                         If this is unexpected, delete ~/.root/root.lockfile and try again."
+                    )
+                } else {
+                    anyhow::anyhow!("Failed to acquire lock: {}", e)
+                }
+            })?;
+
+        Ok(Self { lock_path })
+    }
+}
+
+impl Drop for MutationGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
 
 pub mod brew;
+pub mod events;
 
 #[derive(Debug, Serialize)]
 pub struct ListPackage {
@@ -17,11 +75,6 @@ pub struct ListPackage {
 pub struct ListOutput {
     pub packages: Vec<ListPackage>,
     pub nix_profile: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct HistoryOutput {
-    pub snapshots: Vec<Snapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,7 +179,7 @@ fn get_or_create_lock() -> Result<RootLock> {
     } else {
         Ok(RootLock {
             version: 1,
-            platform: "aarch64-darwin".into(),
+            platform: root_lockfile::detect_platform()?,
             nixpkgs: NixpkgsConfig {
                 rev: "unknown".into(),
                 source: "github:NixOS/nixpkgs".into(),
@@ -156,6 +209,15 @@ fn parse_attributes(search_output: &str) -> Vec<String> {
 }
 
 pub fn plan(adapter: &impl NixAdapter, pkg: &str) -> Result<PlanReport> {
+    // v0.1 allowlist enforcement
+    let _spec = resolve_package(pkg).ok_or_else(|| {
+        let supported: Vec<&str> = SUPPORTED_PACKAGES.iter().map(|p| p.name).collect();
+        anyhow::anyhow!(
+            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n  {}\n\nMore packages are coming soon.",
+            pkg,
+            supported.join("\n  ")
+        )
+    })?;
     match adapter.search(pkg) {
         Ok(description) => {
             let attributes = parse_attributes(&description);
@@ -179,6 +241,17 @@ pub fn plan(adapter: &impl NixAdapter, pkg: &str) -> Result<PlanReport> {
 }
 
 pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
+    // v0.1 allowlist enforcement
+    let _spec = resolve_package(pkg).ok_or_else(|| {
+        let supported: Vec<&str> = SUPPORTED_PACKAGES.iter().map(|p| p.name).collect();
+        anyhow::anyhow!(
+            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n  {}\n\nMore packages are coming soon.",
+            pkg,
+            supported.join("\n  ")
+        )
+    })?;
+    root_lockfile::init_root_dir()?;
+    let _guard = MutationGuard::acquire()?;
     let lock = get_or_create_lock()?;
     let before_packages: Vec<String> = lock.packages.iter().map(|p| p.name.clone()).collect();
 
@@ -206,6 +279,16 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
         save_lock(&lock)?;
     }
 
+    let _ = events::record_event(
+        events::RootEventType::Install,
+        events::RootEventStatus::Verified,
+        &format!("root install {}", pkg),
+        Some(pkg.to_string()),
+        Some(snapshot_id.clone()),
+        None,
+        Some("Package installed successfully".to_string()),
+    )?;
+
     let after_packages: Vec<String> = lock.packages.iter().map(|p| p.name.clone()).collect();
 
     let changed: Vec<String> = after_packages
@@ -232,6 +315,7 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
 }
 
 pub fn list(adapter: &impl NixAdapter) -> Result<ListOutput> {
+    root_lockfile::init_root_dir()?;
     let rootfile = get_or_create_rootfile()?;
     let packages: Vec<ListPackage> = rootfile
         .packages
@@ -248,6 +332,8 @@ pub fn list(adapter: &impl NixAdapter) -> Result<ListOutput> {
 }
 
 pub fn remove(adapter: &impl NixAdapter, pkg: &str) -> Result<RemoveReport> {
+    root_lockfile::init_root_dir()?;
+    let _guard = MutationGuard::acquire()?;
     let lock = get_or_create_lock()?;
 
     // Create snapshot before mutation
@@ -272,12 +358,14 @@ pub fn remove(adapter: &impl NixAdapter, pkg: &str) -> Result<RemoveReport> {
     })
 }
 
-pub fn history() -> Result<HistoryOutput> {
-    let snaps = list_snapshots()?;
-    Ok(HistoryOutput { snapshots: snaps })
+pub fn history() -> Result<events::HistoryOutput> {
+    root_lockfile::init_root_dir()?;
+    events::read_events().map(|events| events::HistoryOutput { events })
 }
 
 pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
+    root_lockfile::init_root_dir()?;
+    let _guard = MutationGuard::acquire()?;
     let snaps = list_snapshots()?;
     if snaps.is_empty() {
         return Err(anyhow::anyhow!("No snapshots available for rollback."));
@@ -286,39 +374,59 @@ pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
     let last_snap = &snaps[0];
     let current_lock = get_or_create_lock()?;
 
-    let mut added_since_snap = Vec::new();
+    // Step 1: Compute rollback plan
+    let mut packages_to_remove = Vec::new();
     for curr_pkg in &current_lock.packages {
         if !last_snap.packages.iter().any(|p| p.name == curr_pkg.name) {
-            added_since_snap.push(curr_pkg.name.clone());
+            packages_to_remove.push(curr_pkg.name.clone());
         }
     }
 
-    let mut removed_since_snap = Vec::new();
+    let mut packages_to_install = Vec::new();
     for old_pkg in &last_snap.packages {
         if !current_lock.packages.iter().any(|p| p.name == old_pkg.name) {
-            removed_since_snap.push(old_pkg.name.clone());
+            packages_to_install.push(old_pkg.name.clone());
         }
     }
 
-    // Snapshot again before rollback
-    Snapshot::create(
+    // Step 2: Create a pre-rollback snapshot (for safety)
+    let pre_rollback_snap = root_snapshot::Snapshot::create(
         &format!("before rollback to {}", last_snap.id),
         &current_lock,
     )?;
 
-    // Reconcile
-    for pkg in &added_since_snap {
-        adapter
-            .remove(pkg)
-            .map_err(|e| anyhow::anyhow!("Rollback remove failed: {}", e))?;
-    }
-    for pkg in &removed_since_snap {
-        adapter
-            .install(pkg)
-            .map_err(|e| anyhow::anyhow!("Rollback install failed: {}", e))?;
+    // Step 3: Execute Nix profile changes FIRST
+    for pkg in &packages_to_remove {
+        adapter.remove(pkg).map_err(|e| {
+            let _ = events::record_event(
+                events::RootEventType::Rollback,
+                events::RootEventStatus::Failed,
+                "root rollback --last",
+                None,
+                Some(pre_rollback_snap.id.clone()),
+                Some(last_snap.id.clone()),
+                Some(format!("Failed to remove package '{}': {}", pkg, e)),
+            );
+            anyhow::anyhow!("Rollback failed to remove '{}': {}", pkg, e)
+        })?;
     }
 
-    // Overwrite lockfile & rootfile to match snapshot EXACTLY
+    for pkg in &packages_to_install {
+        adapter.install(pkg).map_err(|e| {
+            let _ = events::record_event(
+                events::RootEventType::Rollback,
+                events::RootEventStatus::Failed,
+                "root rollback --last",
+                None,
+                Some(pre_rollback_snap.id.clone()),
+                Some(last_snap.id.clone()),
+                Some(format!("Failed to install package '{}': {}", pkg, e)),
+            );
+            anyhow::anyhow!("Rollback failed to install '{}': {}", pkg, e)
+        })?;
+    }
+
+    // Step 4: ONLY NOW update Rootfile and root.lock (after Nix succeeded)
     let mut rootfile = get_or_create_rootfile()?;
     rootfile.packages.clear();
     let mut restored_lock = current_lock;
@@ -341,16 +449,46 @@ pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
     save_rootfile(&rootfile)?;
     save_lock(&restored_lock)?;
 
+    // Step 5: Record rollback event
+    let _ = events::record_event(
+        events::RootEventType::Rollback,
+        events::RootEventStatus::Completed,
+        "root rollback --last",
+        None,
+        Some(pre_rollback_snap.id.clone()),
+        Some(last_snap.id.clone()),
+        Some(format!(
+            "Removed: {}. Restored: {}.",
+            packages_to_remove.join(", "),
+            packages_to_install.join(", ")
+        )),
+    )?;
+
     Ok(RollbackReport {
         success: true,
         from_snapshot: last_snap.id.clone(),
-        packages_removed: added_since_snap,
-        packages_restored: removed_since_snap,
+        packages_removed: packages_to_remove,
+        packages_restored: packages_to_install,
     })
 }
 
 pub fn doctor(adapter: &impl NixAdapter) -> Result<root_doctor::DoctorReport> {
-    root_doctor::run_diagnostics(adapter)
+    root_lockfile::init_root_dir()?;
+    let report = root_doctor::run_diagnostics(adapter)?;
+    let _ = events::record_event(
+        events::RootEventType::Doctor,
+        events::RootEventStatus::Completed,
+        "root doctor",
+        None,
+        None,
+        None,
+        if report.healthy {
+            Some("System healthy".to_string())
+        } else {
+            Some(format!("Issues found: {}", report.issues.len()))
+        },
+    )?;
+    Ok(report)
 }
 
 pub fn verify(pkg: &str) -> Result<root_verify::VerificationReport> {
@@ -386,6 +524,8 @@ pub struct LockReport {
 }
 
 pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
+    root_lockfile::init_root_dir()?;
+    let _guard = MutationGuard::acquire()?;
     let rootfile = get_or_create_rootfile()?;
     let old_lock = get_or_create_lock()?;
 
@@ -446,6 +586,8 @@ pub struct SyncReport {
 }
 
 pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
+    root_lockfile::init_root_dir()?;
+    let _guard = MutationGuard::acquire()?;
     let lock = get_or_create_lock()?;
     let nix_list = adapter.list().map_err(|e| anyhow::anyhow!(e))?;
     let profile_pkgs = parse_nix_profile_packages(&nix_list);
@@ -523,26 +665,40 @@ mod tests {
         let _ = root_lockfile::init_root_dir();
         let adapter = MockNixAdapter::new(true);
 
-        install(&adapter, "test-pkg-1").unwrap();
-        install(&adapter, "test-pkg-2").unwrap();
+        // Manually set up an initial package (bypasses allowlist)
+        adapter.install("test-pkg-1").unwrap();
+        let mut lock = get_or_create_lock().unwrap();
+        lock.packages.push(LockedPackage {
+            name: "test-pkg-1".into(),
+            requested: "test-pkg-1".into(),
+            version: "latest".into(),
+            attribute: "test-pkg-1".into(),
+            store_path: root_lockfile::derive_store_path("test-pkg-1", "latest"),
+            binaries: vec!["test-pkg-1".into()],
+        });
+        save_lock(&lock).unwrap();
+        let mut rootfile = get_or_create_rootfile().unwrap();
+        rootfile
+            .packages
+            .insert("test-pkg-1".into(), "latest".into());
+        save_rootfile(&rootfile).unwrap();
+
+        // Use core::install for the only supported package
+        install(&adapter, "ffmpeg").unwrap();
 
         let hist = history().unwrap();
         assert!(hist
-            .snapshots
+            .events
             .iter()
-            .any(|s| s.reason.contains("test-pkg-1")));
-        assert!(hist
-            .snapshots
-            .iter()
-            .any(|s| s.reason.contains("test-pkg-2")));
+            .any(|e| e.package.as_deref() == Some("ffmpeg")));
 
         let res = rollback_last(&adapter).unwrap();
         assert!(res.success);
 
         let rf = get_or_create_rootfile().unwrap();
-        // Rollback reverts the LAST action (which was installing test-pkg-2)
+        // Rollback reverts the ffmpeg install, leaving test-pkg-1
         assert!(rf.packages.contains_key("test-pkg-1"));
-        assert!(!rf.packages.contains_key("test-pkg-2"));
+        assert!(!rf.packages.contains_key("ffmpeg"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

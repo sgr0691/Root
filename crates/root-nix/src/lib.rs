@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
@@ -22,22 +23,36 @@ pub trait NixAdapter {
     fn remove(&self, package_or_index: &str) -> Result<(), NixError>;
 }
 
-pub struct RealNixAdapter;
+pub struct RealNixAdapter {
+    profile_path: PathBuf,
+}
 
 impl Default for RealNixAdapter {
     fn default() -> Self {
-        Self::new()
+        Self::new_default()
     }
 }
 
 impl RealNixAdapter {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(profile_path: PathBuf) -> Self {
+        Self { profile_path }
     }
 
-    fn run_command(args: &[&str], package_context: Option<&str>) -> Result<String, NixError> {
+    pub fn new_default() -> Self {
+        let home = dirs::home_dir().expect("Could not determine home directory");
+        Self {
+            profile_path: home.join(".root").join("profiles").join("default"),
+        }
+    }
+
+    fn run_command(
+        args: &[&str],
+        extra_args: &[&str],
+        package_context: Option<&str>,
+    ) -> Result<String, NixError> {
         let output = Command::new("nix")
             .args(args)
+            .args(extra_args)
             .output()
             .map_err(|_| NixError::NotInstalled)?;
 
@@ -65,7 +80,7 @@ impl RealNixAdapter {
 
 impl NixAdapter for RealNixAdapter {
     fn check_availability(&self) -> Result<bool, NixError> {
-        match Self::run_command(&["--version"], None) {
+        match Self::run_command(&["--version"], &[], None) {
             Ok(_) => Ok(true),
             Err(NixError::NotInstalled) => Ok(false),
             Err(e) => Err(e),
@@ -73,21 +88,30 @@ impl NixAdapter for RealNixAdapter {
     }
 
     fn search(&self, package: &str) -> Result<String, NixError> {
-        Self::run_command(&["search", "nixpkgs", package], Some(package))
+        Self::run_command(&["search", "nixpkgs", package], &[], Some(package))
     }
 
     fn install(&self, package: &str) -> Result<(), NixError> {
         let pkg_arg = format!("nixpkgs#{}", package);
-        Self::run_command(&["profile", "install", &pkg_arg], Some(package)).map(|_| ())
+        let profile_str = self.profile_path.to_str().unwrap();
+        Self::run_command(
+            &["profile", "install", &pkg_arg],
+            &["--profile", profile_str],
+            Some(package),
+        )
+        .map(|_| ())
     }
 
     fn list(&self) -> Result<String, NixError> {
-        Self::run_command(&["profile", "list"], None)
+        let profile_str = self.profile_path.to_str().unwrap();
+        Self::run_command(&["profile", "list"], &["--profile", profile_str], None)
     }
 
     fn remove(&self, package_or_index: &str) -> Result<(), NixError> {
+        let profile_str = self.profile_path.to_str().unwrap();
         Self::run_command(
             &["profile", "remove", package_or_index],
+            &["--profile", profile_str],
             Some(package_or_index),
         )
         .map(|_| ())

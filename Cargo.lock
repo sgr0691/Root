@@ -468,12 +468,14 @@ name = "root-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "root-doctor",
  "root-lockfile",
  "root-nix",
  "root-snapshot",
  "root-verify",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -505,6 +507,7 @@ name = "root-nix"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "thiserror",
 ]
 

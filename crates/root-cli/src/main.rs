@@ -6,7 +6,7 @@ use std::process;
 #[derive(Parser, Debug)]
 #[command(
     name = "root",
-    about = "Root CLI - Deterministic package management via Nix",
+    about = "Root CLI - Nix-backed installs with history and rollback",
     version
 )]
 struct Cli {
@@ -104,7 +104,9 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
         6
     } else if msg.contains("verification") || msg.contains("Verification") {
         4
-    } else if msg.contains("unsupported import source") || msg.contains("Only 'brew' is supported")
+    } else if msg.contains("unsupported import source")
+        || msg.contains("Only 'brew' is supported")
+        || msg.contains("Root v0.1 does not support")
     {
         2
     } else if msg.contains("Drift") || msg.contains("drift") {
@@ -145,7 +147,13 @@ fn handle_structured<T: Serialize>(
 
 fn main() {
     let cli = Cli::parse();
-    let adapter = RealNixAdapter::new();
+    let profile_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("~"))
+        .join(".root")
+        .join("profiles")
+        .join("default");
+    let adapter = RealNixAdapter::new(profile_path);
 
     match cli.command {
         Commands::Init { install_nix } => {
@@ -165,8 +173,7 @@ fn main() {
                 }
                 if r.nix_detected {
                     msg.push_str("\n\nNext:");
-                    msg.push_str("\n  root install poppler");
-                    msg.push_str("\n  root import brew");
+                    msg.push_str("\n  root install ffmpeg");
                 }
                 msg
             });
@@ -285,17 +292,29 @@ fn main() {
                 if cli.json {
                     print_json(&output);
                 } else {
-                    if output.snapshots.is_empty() {
-                        println!("No snapshots found.");
+                    if output.events.is_empty() {
+                        println!("No Root-managed changes yet.");
+                        println!();
+                        println!("Try:");
+                        println!("  root install ffmpeg");
                     } else {
-                        println!("Snapshot History:");
-                        for snap in &output.snapshots {
-                            println!(
-                                "  {} | {} | {}",
-                                snap.created_at.format("%Y-%m-%d %H:%M:%S"),
-                                snap.id,
-                                snap.reason
-                            );
+                        println!("Root history");
+                        println!();
+                        for event in &output.events {
+                            let type_str = format!("{:?}", event.event_type).to_lowercase();
+                            println!("  {}", event.timestamp);
+                            println!("    event: {}", type_str);
+                            println!("    status: {:?}", event.status);
+                            if let Some(ref pkg) = event.package {
+                                println!("    package: {}", pkg);
+                            }
+                            if let Some(ref sid) = event.snapshot_id {
+                                println!("    snapshot: {}", sid);
+                            }
+                            if let Some(ref rsid) = event.restored_snapshot_id {
+                                println!("    restored: {}", rsid);
+                            }
+                            println!();
                         }
                     }
                 }
@@ -345,10 +364,10 @@ fn main() {
                     println!("Root health check\n");
                     if report.issues.is_empty() {
                         println!("✓ Nix available");
-                        println!("✓ Root profile active");
-                        println!("✓ Machine matches root.lock");
-                        println!("✓ No PATH conflicts detected");
-                        println!("\nYour machine is in sync.");
+                        println!("✓ Root profile ready");
+                        println!("✓ Event ledger writable");
+                        println!("✓ No issues detected");
+                        println!("\nRoot is ready.");
                     } else {
                         for issue in &report.issues {
                             let icon = match issue.severity {
