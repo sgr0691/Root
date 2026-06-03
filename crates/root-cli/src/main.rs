@@ -291,31 +291,29 @@ fn main() {
             Ok(output) => {
                 if cli.json {
                     print_json(&output);
+                } else if output.events.is_empty() {
+                    println!("No Root-managed changes yet.");
+                    println!();
+                    println!("Try:");
+                    println!("  root install ffmpeg");
                 } else {
-                    if output.events.is_empty() {
-                        println!("No Root-managed changes yet.");
-                        println!();
-                        println!("Try:");
-                        println!("  root install ffmpeg");
-                    } else {
-                        println!("Root history");
-                        println!();
-                        for event in &output.events {
-                            let type_str = format!("{:?}", event.event_type).to_lowercase();
-                            println!("  {}", event.timestamp);
-                            println!("    event: {}", type_str);
-                            println!("    status: {:?}", event.status);
-                            if let Some(ref pkg) = event.package {
-                                println!("    package: {}", pkg);
-                            }
-                            if let Some(ref sid) = event.snapshot_id {
-                                println!("    snapshot: {}", sid);
-                            }
-                            if let Some(ref rsid) = event.restored_snapshot_id {
-                                println!("    restored: {}", rsid);
-                            }
-                            println!();
+                    println!("Root history");
+                    println!();
+                    for event in &output.events {
+                        let type_str = format!("{:?}", event.event_type).to_lowercase();
+                        println!("  {}", event.timestamp);
+                        println!("    event: {}", type_str);
+                        println!("    status: {:?}", event.status);
+                        if let Some(ref pkg) = event.package {
+                            println!("    package: {}", pkg);
                         }
+                        if let Some(ref sid) = event.snapshot_id {
+                            println!("    snapshot: {}", sid);
+                        }
+                        if let Some(ref rsid) = event.restored_snapshot_id {
+                            println!("    restored: {}", rsid);
+                        }
+                        println!();
                     }
                 }
             }
