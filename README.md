@@ -1,4 +1,4 @@
-# Root v0.1
+# Root v0.1.1
 
 > A Nix-backed trust demo for safe installs, history, and rollback.
 
@@ -14,7 +14,7 @@ undo it — without needing to learn Nix.
 curl -fsSL https://raw.githubusercontent.com/sgr0691/Root/main/scripts/install.sh | sh
 ```
 
-## Quick Start (v0.1 — trust demo)
+## Quick Start (v0.1.1 — trust demo)
 
 ```bash
 root doctor
