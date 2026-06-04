@@ -8,6 +8,8 @@ use std::io::{BufRead, BufReader, Write};
 pub enum RootEventType {
     Doctor,
     Install,
+    Remove,
+    Verification,
     VerificationFailed,
     Rollback,
 }

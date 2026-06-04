@@ -102,7 +102,11 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
     let msg = format!("{:?}", e);
     if msg.contains("Rollback") || msg.contains("rollback") {
         6
-    } else if msg.contains("verification") || msg.contains("Verification") {
+    } else if msg.contains("verification")
+        || msg.contains("Verification")
+        || msg.contains("root.lock does not exist")
+        || msg.contains("is not found in root.lock")
+    {
         4
     } else if msg.contains("unsupported import source")
         || msg.contains("Only 'brew' is supported")
@@ -291,31 +295,43 @@ fn main() {
             Ok(output) => {
                 if cli.json {
                     print_json(&output);
+                } else if output.snapshots.is_empty() && output.events.is_empty() {
+                    println!("No Root-managed snapshots yet.");
+                    println!();
+                    println!("Try:");
+                    println!("  root install ffmpeg");
                 } else {
-                    if output.events.is_empty() {
-                        println!("No Root-managed changes yet.");
-                        println!();
-                        println!("Try:");
-                        println!("  root install ffmpeg");
-                    } else {
-                        println!("Root history");
-                        println!();
-                        for event in &output.events {
-                            let type_str = format!("{:?}", event.event_type).to_lowercase();
-                            println!("  {}", event.timestamp);
-                            println!("    event: {}", type_str);
-                            println!("    status: {:?}", event.status);
-                            if let Some(ref pkg) = event.package {
-                                println!("    package: {}", pkg);
-                            }
-                            if let Some(ref sid) = event.snapshot_id {
-                                println!("    snapshot: {}", sid);
-                            }
-                            if let Some(ref rsid) = event.restored_snapshot_id {
-                                println!("    restored: {}", rsid);
-                            }
+                    println!("Root history");
+                    println!();
+                    if !output.snapshots.is_empty() {
+                        println!("Snapshots");
+                        for snapshot in &output.snapshots {
+                            println!("  {}", snapshot.created_at);
+                            println!("    snapshot: {}", snapshot.id);
+                            println!("    reason: {}", snapshot.reason);
+                            println!("    packages: {}", snapshot.package_count);
+                            println!("    lock hash: {}", snapshot.lock_content_hash);
                             println!();
                         }
+                    }
+                    if !output.events.is_empty() {
+                        println!("Events");
+                    }
+                    for event in &output.events {
+                        let type_str = format!("{:?}", event.event_type).to_lowercase();
+                        println!("  {}", event.timestamp);
+                        println!("    event: {}", type_str);
+                        println!("    status: {:?}", event.status);
+                        if let Some(ref pkg) = event.package {
+                            println!("    package: {}", pkg);
+                        }
+                        if let Some(ref sid) = event.snapshot_id {
+                            println!("    snapshot: {}", sid);
+                        }
+                        if let Some(ref rsid) = event.restored_snapshot_id {
+                            println!("    restored: {}", rsid);
+                        }
+                        println!();
                     }
                 }
             }
@@ -386,7 +402,7 @@ fn main() {
                     }
                 }
 
-                if (check && !report.issues.is_empty()) || !report.healthy {
+                if check && !report.issues.is_empty() {
                     process::exit(5);
                 }
             }
@@ -429,6 +445,12 @@ fn main() {
                                 if !bin_res.stderr.is_empty() {
                                     println!("     Stderr: {}", bin_res.stderr.trim());
                                 }
+                            }
+                            if let Some(ref resolved_path) = bin_res.resolved_path {
+                                println!("     Path: {}", resolved_path);
+                            }
+                            if !bin_res.attempted_args.is_empty() {
+                                println!("     Args: {}", bin_res.attempted_args.join(" "));
                             }
                         }
                         println!();

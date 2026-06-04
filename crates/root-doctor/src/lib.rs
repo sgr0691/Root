@@ -1,7 +1,8 @@
 use anyhow::Result;
-use root_lockfile::{get_root_dir, RootLock, Rootfile};
+use root_lockfile::{get_root_dir, is_unknown_nixpkgs_rev, RootLock, RootLockV2, Rootfile};
 use root_nix::NixAdapter;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +46,7 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                     category: "Nix".to_string(),
                     description: "Nix package manager is not installed or not in PATH.".to_string(),
                     suggestion:
-                        "Install Nix by running: curl -L https://nixos.org/nix/install | sh"
+                        "Run `root init --install-nix` or install Nix from https://nixos.org/download/."
                             .to_string(),
                 });
             }
@@ -95,6 +96,20 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                     suggestion: "Run `root init` to recreate the profile directory.".to_string(),
                 });
             }
+
+            let default_profile_bin = default_profile.join("bin");
+            if !default_profile_bin.exists() || !default_profile_bin.is_dir() {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "Repository".to_string(),
+                    description:
+                        "Root profile binary directory (~/.root/profiles/default/bin) is missing."
+                            .to_string(),
+                    suggestion:
+                        "Run `root sync` after packages are locked to recreate profile links."
+                            .to_string(),
+                });
+            }
         } else {
             report.issues.push(DoctorIssue {
                 severity: IssueSeverity::Error,
@@ -114,7 +129,7 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
 
     // 3. Lockfile and Configuration Status
     let mut rootfile_opt = None;
-    let mut lockfile_opt = None;
+    let mut lockfile_opt: Option<RootLockV2> = None;
 
     if has_root_dir {
         let root_dir = root_dir_res.unwrap();
@@ -149,8 +164,70 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
 
         // Read Lockfile
         if lock_path.exists() {
-            match RootLock::read_from_file(&lock_path) {
-                Ok(lock) => lockfile_opt = Some(lock),
+            match read_lock_v2(&lock_path) {
+                Ok(lock) => {
+                    if lock.version < root_lockfile::ROOT_LOCK_SCHEMA_VERSION {
+                        report.issues.push(DoctorIssue {
+                            severity: IssueSeverity::Warning,
+                            category: "Config".to_string(),
+                            description: format!(
+                                "root.lock uses legacy schema version {}.",
+                                lock.version
+                            ),
+                            suggestion:
+                                "Run `root lock` to regenerate deterministic lock metadata."
+                                    .to_string(),
+                        });
+                    }
+
+                    // Detect nondeterministic legacy markers
+                    for pkg in &lock.packages {
+                        if pkg.has_latest_version() {
+                            report.issues.push(DoctorIssue {
+                                severity: IssueSeverity::Warning,
+                                category: "Config".to_string(),
+                                description: format!(
+                                    "Package '{}' has floating 'latest' version in root.lock.",
+                                    pkg.name
+                                ),
+                                suggestion: format!(
+                                    "Run `root lock` or `root install {}` to lock a concrete version.",
+                                    pkg.name
+                                ),
+                            });
+                        }
+                        if pkg.has_placeholder_store_path() {
+                            report.issues.push(DoctorIssue {
+                                severity: IssueSeverity::Warning,
+                                category: "Config".to_string(),
+                                description: format!(
+                                    "Package '{}' has placeholder store path '{}' in root.lock.",
+                                    pkg.name,
+                                    pkg.store_path
+                                ),
+                                suggestion: format!(
+                                    "Run `root lock` or `root install {}` to resolve the real Nix store path.",
+                                    pkg.name
+                                ),
+                            });
+                        }
+                    }
+                    if is_unknown_nixpkgs_rev(&lock.nixpkgs.rev) {
+                        report.issues.push(DoctorIssue {
+                            severity: IssueSeverity::Warning,
+                            category: "Config".to_string(),
+                            description: format!(
+                                "root.lock nixpkgs revision '{}' is not a concrete pinned revision.",
+                                lock.nixpkgs.rev
+                            ),
+                            suggestion:
+                                "Run `root lock` to pin the current nixpkgs revision with real metadata."
+                                    .to_string(),
+                        });
+                    }
+
+                    lockfile_opt = Some(lock);
+                }
                 Err(e) => {
                     report.issues.push(DoctorIssue {
                         severity: IssueSeverity::Error,
@@ -162,6 +239,14 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                     });
                 }
             }
+        } else {
+            report.issues.push(DoctorIssue {
+                severity: IssueSeverity::Warning,
+                category: "Config".to_string(),
+                description: "root.lock (~/.root/root.lock) is missing.".to_string(),
+                suggestion: "Run `root lock` after adding packages to Rootfile, or run `root install <package>`."
+                    .to_string(),
+            });
         }
     }
 
@@ -170,7 +255,8 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
         if let (Some(ref rootfile), Some(ref lockfile)) = (&rootfile_opt, &lockfile_opt) {
             // Check for Rootfile packages missing from lockfile
             for pkg_name in rootfile.packages.keys() {
-                if !lockfile.packages.iter().any(|p| p.name == *pkg_name) {
+                let Some(locked_pkg) = lockfile.packages.iter().find(|p| p.name == *pkg_name)
+                else {
                     report.issues.push(DoctorIssue {
                         severity: IssueSeverity::Warning,
                         category: "Drift".to_string(),
@@ -183,34 +269,103 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                             pkg_name
                         ),
                     });
+                    continue;
+                };
+
+                if let Some(requested_version) = rootfile.packages.get(pkg_name) {
+                    if requested_version != &locked_pkg.version {
+                        report.issues.push(DoctorIssue {
+                            severity: IssueSeverity::Warning,
+                            category: "Drift".to_string(),
+                            description: format!(
+                                "Package '{}' has Rootfile version '{}' but root.lock version '{}'.",
+                                pkg_name, requested_version, locked_pkg.version
+                            ),
+                            suggestion: format!(
+                                "Run `root lock` to refresh deterministic metadata for '{}'.",
+                                pkg_name
+                            ),
+                        });
+                    }
+                }
+            }
+
+            for locked_pkg in &lockfile.packages {
+                if !rootfile.packages.contains_key(&locked_pkg.name) {
+                    report.issues.push(DoctorIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Drift".to_string(),
+                        description: format!(
+                            "Package '{}' is locked but not listed in Rootfile.",
+                            locked_pkg.name
+                        ),
+                        suggestion: format!(
+                            "Add '{}' to Rootfile or run `root lock` after updating Rootfile.",
+                            locked_pkg.name
+                        ),
+                    });
                 }
             }
 
             // Fetch actual Nix profile packages
-            match adapter.list() {
-                Ok(nix_list) => {
-                    // Compare expected locked packages to actual Nix profile packages
-                    for locked_pkg in &lockfile.packages {
-                        // Normally `nix profile list` returns containing `nixpkgs#<attr>` or similar.
-                        // Let's check if the list stdout contains either the name, the attribute, or nixpkgs#attribute.
-                        let is_installed = nix_list
-                            .contains(&format!("nixpkgs#{}", locked_pkg.attribute))
-                            || nix_list.contains(&locked_pkg.attribute)
-                            || nix_list.contains(&locked_pkg.name);
+            match adapter.profile_list_json() {
+                Ok(profile_json) => {
+                    let profile_entries = parse_profile_entries(&profile_json);
+                    let profile_store_paths: BTreeSet<String> = profile_entries
+                        .iter()
+                        .flat_map(|entry| entry.store_paths.iter().cloned())
+                        .collect();
+                    let locked_names: BTreeSet<String> = lockfile
+                        .packages
+                        .iter()
+                        .map(|pkg| pkg.name.clone())
+                        .collect();
 
-                        if !is_installed {
+                    for locked_pkg in &lockfile.packages {
+                        let expected_paths = locked_pkg
+                            .store_paths
+                            .values()
+                            .cloned()
+                            .chain(std::iter::once(locked_pkg.store_path.clone()))
+                            .filter(|path| !path.is_empty())
+                            .collect::<BTreeSet<_>>();
+
+                        let missing_paths = expected_paths
+                            .difference(&profile_store_paths)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !missing_paths.is_empty() {
                             report.issues.push(DoctorIssue {
                                 severity: IssueSeverity::Error,
                                 category: "Drift".to_string(),
                                 description: format!(
-                                    "Locked package '{}' is missing from the active Nix profile.",
-                                    locked_pkg.name
+                                    "Locked package '{}' is missing expected store output(s) from the Root profile: {}.",
+                                    locked_pkg.name,
+                                    missing_paths.join(", ")
                                 ),
                                 suggestion: format!(
-                                    "Run `root install {}` to reinstall and repair.",
+                                    "Run `root sync` or `root install {}` to repair the Root profile.",
                                     locked_pkg.name
                                 ),
                             });
+                        }
+                    }
+
+                    for entry in &profile_entries {
+                        if let Some(name) = entry.package_name() {
+                            if !locked_names.contains(&name) {
+                                report.issues.push(DoctorIssue {
+                                    severity: IssueSeverity::Error,
+                                    category: "Drift".to_string(),
+                                    description: format!(
+                                        "Root profile contains '{}' but it is absent from root.lock.",
+                                        name
+                                    ),
+                                    suggestion:
+                                        "Run `root sync` to reconcile the Root profile with root.lock."
+                                            .to_string(),
+                                });
+                            }
                         }
                     }
                 }
@@ -218,7 +373,7 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                     report.issues.push(DoctorIssue {
                         severity: IssueSeverity::Warning,
                         category: "Nix".to_string(),
-                        description: format!("Failed to read Nix profile list: {}", e),
+                        description: format!("Failed to read Nix profile JSON: {}", e),
                         suggestion: "Ensure nix profile operations are functioning normally."
                             .to_string(),
                     });
@@ -229,24 +384,29 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
 
     // 5. Check PATH & Shadows
     if let Some(ref lockfile) = lockfile_opt {
-        // Collect all Nix-profile bin dirs or default Nix bin path
-        let mut nix_in_path = false;
-        if let Some(paths) = env::var_os("PATH") {
+        let root_profile_bin = get_root_dir()
+            .ok()
+            .map(|root_dir| root_dir.join("profiles").join("default").join("bin"));
+
+        let mut root_profile_in_path = false;
+        if let (Some(paths), Some(root_bin)) = (env::var_os("PATH"), root_profile_bin.as_ref()) {
             for path in env::split_paths(&paths) {
-                let path_str = path.to_string_lossy();
-                if path_str.contains(".nix-profile") || path_str.contains("nix") {
-                    nix_in_path = true;
+                if path == *root_bin {
+                    root_profile_in_path = true;
                     break;
                 }
             }
         }
 
-        if !nix_in_path {
+        if !root_profile_in_path {
             report.issues.push(DoctorIssue {
                 severity: IssueSeverity::Warning,
                 category: "Environment".to_string(),
-                description: "Nix profile binary path (~/.nix-profile/bin) is not found in your PATH environment variable.".to_string(),
-                suggestion: "Add '~/.nix-profile/bin' to your PATH in your shell configuration (.zshrc, .bashrc, or .bash_profile).".to_string(),
+                description: "Root profile binary path (~/.root/profiles/default/bin) is not found in PATH."
+                    .to_string(),
+                suggestion:
+                    "Add '~/.root/profiles/default/bin' before Homebrew and system package paths in your shell PATH."
+                        .to_string(),
             });
         }
 
@@ -254,23 +414,26 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
             for binary in &locked_pkg.binaries {
                 match find_on_path(binary) {
                     Some(bin_path) => {
-                        let path_str = bin_path.to_string_lossy();
-                        // Check if it's from Nix or shadowed
-                        let is_nix = path_str.contains(".nix-profile")
-                            || path_str.contains("/nix/var/nix/profiles")
-                            || path_str.contains("/nix/store")
-                            || path_str.contains("/nix/profile");
+                        let is_root_profile = root_profile_bin
+                            .as_ref()
+                            .map(|root_bin| bin_path.starts_with(root_bin))
+                            .unwrap_or(false);
+                        let is_locked_store = locked_pkg
+                            .store_paths
+                            .values()
+                            .chain(std::iter::once(&locked_pkg.store_path))
+                            .any(|store_path| bin_path.starts_with(store_path));
 
-                        if !is_nix {
+                        if !is_root_profile && !is_locked_store {
                             report.issues.push(DoctorIssue {
                                 severity: IssueSeverity::Warning,
                                 category: "Conflict".to_string(),
                                 description: format!(
                                     "Binary '{}' from package '{}' is shadowed by another installation at '{}'.",
-                                    binary, locked_pkg.name, path_str
+                                    binary, locked_pkg.name, bin_path.display()
                                 ),
                                 suggestion: format!(
-                                    "Uninstall the conflicting package from Brew/system, or re-order your PATH so '~/.nix-profile/bin' precedes '{}'.",
+                                    "Move '~/.root/profiles/default/bin' before '{}' in PATH or remove the conflicting binary.",
                                     bin_path.parent().unwrap_or(Path::new("")).display()
                                 ),
                             });
@@ -280,8 +443,13 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                         report.issues.push(DoctorIssue {
                             severity: IssueSeverity::Warning,
                             category: "Environment".to_string(),
-                            description: format!("Binary '{}' from package '{}' is not accessible in your current PATH.", binary, locked_pkg.name),
-                            suggestion: "Ensure '~/.nix-profile/bin' is included in your PATH and active.".to_string(),
+                            description: format!(
+                                "Binary '{}' from package '{}' is not accessible in PATH.",
+                                binary, locked_pkg.name
+                            ),
+                            suggestion:
+                                "Run `root sync` and ensure '~/.root/profiles/default/bin' is in PATH."
+                                    .to_string(),
                         });
                     }
                 }
@@ -310,6 +478,85 @@ fn find_on_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+fn read_lock_v2(path: &Path) -> Result<RootLockV2> {
+    RootLockV2::read_from_file(path)
+        .or_else(|_| RootLock::read_from_file(path).map(|lock| lock.to_v2()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileJsonEntry {
+    attr_path: Option<String>,
+    installable: Option<String>,
+    store_paths: Vec<String>,
+}
+
+impl ProfileJsonEntry {
+    fn package_name(&self) -> Option<String> {
+        self.attr_path
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(|value| value.rsplit('.').next().unwrap_or(value).to_string())
+            .or_else(|| {
+                self.installable.as_ref().and_then(|installable| {
+                    installable
+                        .rsplit_once('#')
+                        .map(|(_, name)| name.to_string())
+                })
+            })
+    }
+}
+
+fn parse_profile_entries(profile_json: &str) -> Vec<ProfileJsonEntry> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(profile_json) else {
+        return Vec::new();
+    };
+
+    match value {
+        serde_json::Value::Array(entries) => {
+            entries.iter().filter_map(parse_profile_entry).collect()
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(elements) = map.get("elements").and_then(|value| value.as_array()) {
+                elements.iter().filter_map(parse_profile_entry).collect()
+            } else {
+                map.values().filter_map(parse_profile_entry).collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_profile_entry(value: &serde_json::Value) -> Option<ProfileJsonEntry> {
+    let object = value.as_object()?;
+    let attr_path = object
+        .get("attrPath")
+        .or_else(|| object.get("attr_path"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let installable = object
+        .get("installable")
+        .or_else(|| object.get("originalUrl"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let store_paths = object
+        .get("storePaths")
+        .or_else(|| object.get("store_paths"))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(ProfileJsonEntry {
+        attr_path,
+        installable,
+        store_paths,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,13 +582,26 @@ mod tests {
         (temp_dir, guard)
     }
 
+    fn first_mock_store_path(adapter: &MockNixAdapter) -> String {
+        let profile_json = adapter.profile_list_json().unwrap();
+        parse_profile_entries(&profile_json)
+            .first()
+            .and_then(|entry| entry.store_paths.first())
+            .cloned()
+            .unwrap()
+    }
+
     #[test]
     fn test_diagnostics_healthy_with_packages() {
         let (_temp_home, _guard) = setup_test_home("test_diagnostics_healthy_with_packages");
         let root_dir = root_lockfile::init_root_dir().unwrap();
+        let profile_bin = root_dir.join("profiles").join("default").join("bin");
+        fs::create_dir_all(&profile_bin).unwrap();
+        std::env::set_var("PATH", &profile_bin);
 
         let adapter = MockNixAdapter::new(true);
         adapter.install("poppler").unwrap();
+        let store_path = first_mock_store_path(&adapter);
 
         // Create standard Rootfile and root.lock
         let mut rf = Rootfile::default();
@@ -350,7 +610,7 @@ mod tests {
         rf.write_to_file(&root_dir.join("Rootfile")).unwrap();
 
         let lock = RootLock {
-            version: 1,
+            version: root_lockfile::ROOT_LOCK_SCHEMA_VERSION,
             platform: "aarch64-darwin".into(),
             nixpkgs: NixpkgsConfig {
                 rev: "some-rev".into(),
@@ -361,8 +621,8 @@ mod tests {
                 requested: "poppler".to_string(),
                 version: "latest".to_string(),
                 attribute: "poppler".to_string(),
-                store_path: root_lockfile::derive_store_path("poppler", "latest"),
-                binaries: vec!["pdftotext".to_string()],
+                store_path,
+                binaries: vec![],
             }],
         };
         lock.write_to_file(&root_dir.join("root.lock")).unwrap();
@@ -371,14 +631,29 @@ mod tests {
         let report = run_diagnostics(&adapter).unwrap();
         assert!(report.nix_installed);
         assert!(report.root_initialized);
-        // It might have a warning about pdftotext not being on PATH or not a Nix binary — correct and expected!
-        // But check that no fatal Nix or Config errors were raised.
         let error_count = report
             .issues
             .iter()
             .filter(|i| i.severity == IssueSeverity::Error)
             .count();
         assert_eq!(error_count, 0);
+    }
+
+    #[test]
+    fn test_diagnostics_does_not_initialize_missing_root_dir() {
+        let (temp_home, _guard) = setup_test_home("test_diagnostics_does_not_initialize");
+        let root_dir = temp_home.join(".root");
+        assert!(!root_dir.exists());
+
+        let adapter = MockNixAdapter::new(true);
+        let report = run_diagnostics(&adapter).unwrap();
+
+        assert!(!report.root_initialized);
+        assert!(!root_dir.exists());
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.category == "Repository"));
     }
 
     #[test]
@@ -439,6 +714,97 @@ mod tests {
         assert_eq!(drift_issue.severity, IssueSeverity::Error);
         assert!(drift_issue
             .description
-            .contains("missing from the active Nix profile"));
+            .contains("missing expected store output"));
+    }
+
+    #[test]
+    fn test_diagnostics_detects_extra_profile_package() {
+        let (_temp_home, _guard) = setup_test_home("test_diagnostics_extra_profile_package");
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("fd").unwrap();
+
+        let rf = Rootfile::default();
+        rf.write_to_file(&root_dir.join("Rootfile")).unwrap();
+
+        let lock = RootLock {
+            version: root_lockfile::ROOT_LOCK_SCHEMA_VERSION,
+            platform: "aarch64-darwin".into(),
+            nixpkgs: NixpkgsConfig {
+                rev: "some-rev".into(),
+                source: "github:NixOS/nixpkgs".into(),
+            },
+            packages: vec![],
+        };
+        lock.write_to_file(&root_dir.join("root.lock")).unwrap();
+
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.issues.iter().any(|issue| {
+            issue.severity == IssueSeverity::Error
+                && issue.category == "Drift"
+                && issue.description.contains("absent from root.lock")
+        }));
+    }
+
+    #[test]
+    fn test_diagnostics_detects_nondeterministic_lock() {
+        let (_temp_home, _guard) = setup_test_home("test_diagnostics_nondeterministic");
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        let profile_bin = root_dir.join("profiles").join("default").join("bin");
+        fs::create_dir_all(&profile_bin).unwrap();
+        std::env::set_var("PATH", &profile_bin);
+
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("poppler").unwrap();
+
+        // Create v1-style lock with all nondeterministic markers
+        let mut rf = Rootfile::default();
+        rf.packages
+            .insert("poppler".to_string(), "latest".to_string());
+        rf.write_to_file(&root_dir.join("Rootfile")).unwrap();
+
+        let lock = RootLock {
+            version: 1,
+            platform: "aarch64-darwin".into(),
+            nixpkgs: NixpkgsConfig {
+                rev: "unknown".into(),
+                source: "github:NixOS/nixpkgs".into(),
+            },
+            packages: vec![LockedPackage {
+                name: "poppler".to_string(),
+                requested: "poppler".to_string(),
+                version: "latest".to_string(),
+                attribute: "poppler".to_string(),
+                store_path: "/nix/store/xxx".into(),
+                binaries: vec![],
+            }],
+        };
+        lock.write_to_file(&root_dir.join("root.lock")).unwrap();
+
+        let report = run_diagnostics(&adapter).unwrap();
+
+        // Should flag legacy schema version
+        assert!(report.issues.iter().any(|issue| {
+            issue.category == "Config" && issue.description.contains("legacy schema version")
+        }));
+
+        // Should flag floating "latest" version
+        assert!(report.issues.iter().any(|issue| {
+            issue.category == "Config"
+                && issue.description.contains("floating")
+                && issue.description.contains("latest")
+        }));
+
+        // Should flag placeholder store path
+        assert!(report.issues.iter().any(|issue| {
+            issue.category == "Config" && issue.description.contains("placeholder store path")
+        }));
+
+        // Should flag unknown nixpkgs revision
+        assert!(report.issues.iter().any(|issue| {
+            issue.category == "Config"
+                && issue.description.contains("not a concrete pinned revision")
+        }));
     }
 }
