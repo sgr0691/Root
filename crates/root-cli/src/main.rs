@@ -6,7 +6,7 @@ use std::process;
 #[derive(Parser, Debug)]
 #[command(
     name = "root",
-    about = "Root CLI - Nix-backed installs with history and rollback",
+    about = "Root v0.1.3 - curated package manager for developer CLI tools",
     version
 )]
 struct Cli {
@@ -25,6 +25,8 @@ enum Commands {
         #[arg(long)]
         install_nix: bool,
     },
+    /// Show the curated package catalog
+    Catalog,
     /// Search for a package to install
     Plan {
         #[command(subcommand)]
@@ -120,6 +122,76 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
     }
 }
 
+fn format_user_error(e: &anyhow::Error) -> String {
+    if let Some(nix_err) = e.downcast_ref::<root_nix::NixError>() {
+        return match nix_err {
+            root_nix::NixError::NotInstalled => {
+                "Nix is not installed or not available on PATH.\n\n\
+                 To install Nix, run:  root init --install-nix\n\
+                 Or visit:            https://nixos.org/download/"
+                    .to_string()
+            }
+            root_nix::NixError::NotFound(pkg) => {
+                format!(
+                    "Package '{}' was not found in nixpkgs.\n\n\
+                     This may mean the package name is incorrect or the attribute\n\
+                     does not exist on your platform.",
+                    pkg
+                )
+            }
+            root_nix::NixError::PlatformMissing(pkg) => {
+                format!(
+                    "Package '{}' is not available for your platform.\n\n\
+                     Try a different package or check nixpkgs for alternatives:\n  nix search nixpkgs {}",
+                    pkg, pkg
+                )
+            }
+            root_nix::NixError::Generic(msg) => {
+                if msg.contains("error:") || msg.contains("warning:") || msg.contains("access") {
+                    format!("Nix operation failed.\n\nDetails: {}", msg)
+                } else {
+                    format!("Nix operation failed: {}", msg)
+                }
+            }
+        };
+    }
+    let msg = format!("{}", e);
+    if msg.contains("No snapshots") {
+        "No snapshots available for rollback.\n\n\
+         Snapshots are created automatically before every install or remove.\n\
+         Run:  root install ffmpeg\n\
+         Then: root rollback --last"
+            .to_string()
+    } else if msg.contains("root.lock does not exist") {
+        "No lockfile found.\n\n\
+         Run:  root install <package>\n\
+         This will create root.lock with deterministic Nix metadata."
+            .to_string()
+    } else if msg.contains("is not found in root.lock") {
+        format!(
+            "{}.\n\n\
+             Install it first with:  root install {}",
+            msg,
+            msg.split('\'').nth(1).unwrap_or("the-package")
+        )
+    } else if msg.contains("does not support") || msg.contains("not support") {
+        msg
+    } else if msg.contains("stale lockfile") || msg.contains("lockfile is stale") {
+        "The lockfile is stale or from a previous version.\n\n\
+         Run:  root lock\n\
+         This will regenerate the lockfile with current metadata."
+            .to_string()
+    } else if msg.contains("v2 lockfiles") || msg.contains("does not support v2") {
+        msg
+    } else if msg.contains("mutation is in progress") {
+        "Another Root operation is in progress.\n\n\
+         If no other terminal is running Root, delete the lock:\n  rm ~/.root/root.lockfile\nThen try again."
+            .to_string()
+    } else {
+        msg
+    }
+}
+
 fn handle_structured<T: Serialize>(
     json: bool,
     res: anyhow::Result<T>,
@@ -139,10 +211,10 @@ fn handle_structured<T: Serialize>(
             if json {
                 print_json(&GenericOutput {
                     success: false,
-                    message: format!("{:?}", e),
+                    message: format!("{}", e),
                 });
             } else {
-                eprintln!("Error: {:?}", e);
+                eprintln!("Error: {}", format_user_error(&e));
             }
             process::exit(code);
         }
@@ -176,8 +248,14 @@ fn main() {
                     msg.push_str("\n✓ Snapshot system enabled");
                 }
                 if r.nix_detected {
-                    msg.push_str("\n\nNext:");
-                    msg.push_str("\n  root install ffmpeg");
+                    msg.push_str("\n\nRoot is ready.");
+                    msg.push_str("\n\nTry Root in 60 seconds:");
+                    msg.push_str("\n  root doctor           Check system health");
+                    msg.push_str("\n  root install ffmpeg   Install your first package");
+                    msg.push_str("\n  root history          View history");
+                    msg.push_str("\n  root verify ffmpeg    Verify package");
+                    msg.push_str("\n  root rollback --last  Undo the install");
+                    msg.push_str("\n\nRun `root catalog` to see all supported packages.");
                 }
                 msg
             });
@@ -203,14 +281,36 @@ fn main() {
                                         message: format!("Failed to install Nix: {:?}", e),
                                     });
                                 } else {
-                                    eprintln!("Error installing Nix: {:?}", e);
+                                    eprintln!("Error installing Nix: {}", e);
                                 }
                                 process::exit(code);
                             }
                         }
                     } else if !cli.json {
-                        eprintln!("\nNix is required for Root.\nRun: root init --install-nix");
+                        eprintln!("\nNix is required for Root.\n\nTo install Nix, run:\n  root init --install-nix\n\nOr install Nix manually from:\n  https://nixos.org/download/");
                     }
+                }
+            }
+        }
+        Commands::Catalog => {
+            let output = root_core::catalog();
+            if cli.json {
+                print_json(&output);
+            } else {
+                println!("Root supported packages\n");
+                let mut categories: std::collections::BTreeMap<
+                    &str,
+                    Vec<&root_core::CatalogEntry>,
+                > = std::collections::BTreeMap::new();
+                for pkg in &output.packages {
+                    categories.entry(pkg.category).or_default().push(pkg);
+                }
+                for (category, pkgs) in &categories {
+                    println!("{}", category);
+                    for pkg in pkgs {
+                        println!("  {:<12} {}", pkg.name, pkg.description);
+                    }
+                    println!();
                 }
             }
         }
@@ -218,15 +318,48 @@ fn main() {
             PlanSubcommands::Install { pkg } => {
                 let report = handle_structured(cli.json, root_core::plan(&adapter, &pkg), |r| {
                     if r.found {
-                        let attributes = r.attributes.join(", ");
+                        let binaries = r.expected_binaries.join(", ");
+                        let title = if let Some(ref input) = r.original_input {
+                            format!("Install plan for {} → {}", input, r.package)
+                        } else {
+                            format!("Install plan for {}", r.package)
+                        };
                         format!(
-                            "Install plan for {}\n\nWill add:\n  {} ({})\n\nWill not change:\n  (existing packages)\n\nWould create snapshot before install.\nNo changes made.",
+                            "{}\n\
+                             \n\
+                             Overview\n\
+                               Package:     {}\n\
+                               Nix attr:    {}\n\
+                               Binaries:    {}\n\
+                               Verify:      {}\n\
+                             \n\
+                             Steps that will be performed:\n\
+                             1. Supported package check\n\
+                             2. Resolve Nix metadata (version, store path, derivation)\n\
+                             3. Pin nixpkgs revision in root.lock\n\
+                             4. Create pre-install snapshot\n\
+                             5. Install to Root-managed profile\n\
+                             6. Verify profile contains locked store paths\n\
+                             7. Update root.lock with deterministic metadata\n\
+                             8. Record history event\n\
+                             \n\
+                             Rollback available: yes (via root rollback --last)\n\
+                             \n\
+                             This is a preview. No changes have been made.",
+                            title,
                             r.package,
-                            r.package,
-                            if attributes.is_empty() { "latest" } else { &attributes }
+                            r.nix_attr,
+                            binaries,
+                            r.verify_commands.join(", "),
                         )
                     } else {
-                        format!("Package '{}' not found in nixpkgs", r.package)
+                        format!(
+                            "Package '{}' was not found in nixpkgs.\n\
+                             \n\
+                             The package name is on the supported list but Nix could not resolve it.\n\
+                             This may mean the attribute does not exist on your platform.",
+                            r.package
+                        )
                     }
                 });
                 if let Some(report) = report {
@@ -278,7 +411,7 @@ fn main() {
                         message: format!("{:?}", e),
                     });
                 } else {
-                    eprintln!("Error: {:?}", e);
+                    eprintln!("Error: {}", format_user_error(&e));
                 }
                 process::exit(code);
             }
@@ -297,6 +430,8 @@ fn main() {
                     print_json(&output);
                 } else if output.snapshots.is_empty() && output.events.is_empty() {
                     println!("No Root-managed snapshots yet.");
+                    println!();
+                    println!("Run `root catalog` to see supported packages.");
                     println!();
                     println!("Try:");
                     println!("  root install ffmpeg");
@@ -343,7 +478,7 @@ fn main() {
                         message: format!("{:?}", e),
                     });
                 } else {
-                    eprintln!("Error: {:?}", e);
+                    eprintln!("Error: {}", format_user_error(&e));
                 }
                 process::exit(code);
             }
@@ -384,6 +519,12 @@ fn main() {
                         println!("✓ Event ledger writable");
                         println!("✓ No issues detected");
                         println!("\nRoot is ready.");
+                        println!("\nRun `root catalog` to see all supported packages.");
+                        println!("\nNext steps:");
+                        println!("  root install ffmpeg    Install your first package");
+                        println!("  root history           View snapshot history");
+                        println!("  root verify ffmpeg     Verify package binaries");
+                        println!("  root rollback --last   Undo the last change");
                     } else {
                         for issue in &report.issues {
                             let icon = match issue.severity {
@@ -414,7 +555,7 @@ fn main() {
                         message: format!("{:?}", e),
                     });
                 } else {
-                    eprintln!("Error running doctor: {:?}", e);
+                    eprintln!("Error running doctor: {}", format_user_error(&e));
                 }
                 process::exit(code);
             }
@@ -477,7 +618,7 @@ fn main() {
                             message: format!("{:?}", e),
                         });
                     } else {
-                        eprintln!("Error running verification: {:?}", e);
+                        eprintln!("Error running verification: {}", format_user_error(&e));
                     }
                     process::exit(code);
                 }
@@ -536,7 +677,7 @@ fn main() {
                             message: format!("{:?}", e),
                         });
                     } else {
-                        eprintln!("Error running brew import: {:?}", e);
+                        eprintln!("Error running brew import: {}", format_user_error(&e));
                     }
                     process::exit(code);
                 }

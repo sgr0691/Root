@@ -33,14 +33,25 @@ struct VerifyOverride {
 /// Get custom verification arguments/assertions for specific tools.
 fn get_override(binary: &str) -> Option<VerifyOverride> {
     match binary {
-        // Specific tools overrides can go here
         "pdftotext" | "pdfinfo" => Some(VerifyOverride {
-            args: &["-h"],
-            expected_contains: Some("usage"),
+            args: &["-v"],
+            expected_contains: None,
         }),
         "ffmpeg" | "ffprobe" => Some(VerifyOverride {
             args: &["-version"],
             expected_contains: Some("ffmpeg"),
+        }),
+        "rg" => Some(VerifyOverride {
+            args: &["--version"],
+            expected_contains: Some("ripgrep"),
+        }),
+        "jq" => Some(VerifyOverride {
+            args: &["--version"],
+            expected_contains: Some("jq"),
+        }),
+        "openssl" => Some(VerifyOverride {
+            args: &["version"],
+            expected_contains: None,
         }),
         _ => None,
     }
@@ -51,8 +62,27 @@ fn package_default_binaries(package: &str) -> Option<&'static [&'static str]> {
         "ffmpeg" => Some(&["ffmpeg"]),
         "poppler" => Some(&["pdftotext", "pdfinfo"]),
         "ripgrep" => Some(&["rg"]),
-        "fd" => Some(&["fd"]),
         "jq" => Some(&["jq"]),
+        "fd" => Some(&["fd"]),
+        "bat" => Some(&["bat"]),
+        "eza" => Some(&["eza"]),
+        "fzf" => Some(&["fzf"]),
+        "git-lfs" => Some(&["git-lfs"]),
+        "gh" => Some(&["gh"]),
+        "httpie" => Some(&["http"]),
+        "just" => Some(&["just"]),
+        "tree" => Some(&["tree"]),
+        "sqlite" => Some(&["sqlite3"]),
+        "imagemagick" => Some(&["magick", "convert"]),
+        "wget" => Some(&["wget"]),
+        "curl" => Some(&["curl"]),
+        "gnumake" => Some(&["make"]),
+        "pkg-config" => Some(&["pkg-config"]),
+        "openssl" => Some(&["openssl"]),
+        "python3" => Some(&["python3"]),
+        "nodejs" => Some(&["node", "npm"]),
+        "bun" => Some(&["bun"]),
+        "uv" => Some(&["uv"]),
         _ => None,
     }
 }

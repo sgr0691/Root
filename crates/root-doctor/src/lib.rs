@@ -44,9 +44,9 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                 report.issues.push(DoctorIssue {
                     severity: IssueSeverity::Error,
                     category: "Nix".to_string(),
-                    description: "Nix package manager is not installed or not in PATH.".to_string(),
+                    description: "Nix is not installed or not available on PATH.".to_string(),
                     suggestion:
-                        "Run `root init --install-nix` or install Nix from https://nixos.org/download/."
+                        "Run `root init --install-nix` to install Nix automatically, or install from https://nixos.org/download/."
                             .to_string(),
                 });
             }
@@ -56,7 +56,9 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                 severity: IssueSeverity::Error,
                 category: "Nix".to_string(),
                 description: format!("Failed to check Nix availability: {}", e),
-                suggestion: "Ensure Nix is correctly configured on your system.".to_string(),
+                suggestion:
+                    "Run `nix --version` to verify Nix is working, then run `root doctor` again."
+                        .to_string(),
             });
         }
     }
@@ -157,7 +159,7 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                 category: "Config".to_string(),
                 description: "Rootfile (~/.root/Rootfile) is missing.".to_string(),
                 suggestion:
-                    "Create ~/.root/Rootfile or run `root install <package>` to create one."
+                    "Run `root install ffmpeg` to install your first package and auto-create a Rootfile."
                         .to_string(),
             });
         }
@@ -244,8 +246,9 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                 severity: IssueSeverity::Warning,
                 category: "Config".to_string(),
                 description: "root.lock (~/.root/root.lock) is missing.".to_string(),
-                suggestion: "Run `root lock` after adding packages to Rootfile, or run `root install <package>`."
-                    .to_string(),
+                suggestion:
+                    "Run `root install ffmpeg` to create root.lock with deterministic Nix metadata."
+                        .to_string(),
             });
         }
     }
