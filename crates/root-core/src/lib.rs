@@ -11,30 +11,327 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VerifyCommand {
+    pub binary: &'static str,
+    pub args: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageSpec {
     pub name: &'static str,
+    pub aliases: &'static [&'static str],
     pub nix_attr: &'static str,
     pub binaries: &'static [&'static str],
-    pub verify_args: &'static [&'static str],
+    pub verify: &'static [VerifyCommand],
+    pub category: &'static str,
+    pub description: &'static str,
 }
 
 pub const SUPPORTED_PACKAGES: &[PackageSpec] = &[
+    // media
     PackageSpec {
         name: "ffmpeg",
+        aliases: &[],
         nix_attr: "nixpkgs#ffmpeg",
         binaries: &["ffmpeg"],
-        verify_args: &["-version"],
+        verify: &[VerifyCommand {
+            binary: "ffmpeg",
+            args: &["-version"],
+        }],
+        category: "media",
+        description: "Video/audio processing",
+    },
+    PackageSpec {
+        name: "imagemagick",
+        aliases: &[],
+        nix_attr: "nixpkgs#imagemagick",
+        binaries: &["magick", "convert"],
+        verify: &[VerifyCommand {
+            binary: "magick",
+            args: &["--version"],
+        }],
+        category: "media",
+        description: "Image manipulation",
     },
     PackageSpec {
         name: "poppler",
+        aliases: &[],
         nix_attr: "nixpkgs#poppler",
         binaries: &["pdftotext", "pdfinfo"],
-        verify_args: &["-h"],
+        verify: &[
+            VerifyCommand {
+                binary: "pdftotext",
+                args: &["-v"],
+            },
+            VerifyCommand {
+                binary: "pdfinfo",
+                args: &["-v"],
+            },
+        ],
+        category: "media",
+        description: "PDF utilities",
+    },
+    // search
+    PackageSpec {
+        name: "ripgrep",
+        aliases: &["rg"],
+        nix_attr: "nixpkgs#ripgrep",
+        binaries: &["rg"],
+        verify: &[VerifyCommand {
+            binary: "rg",
+            args: &["--version"],
+        }],
+        category: "search",
+        description: "Fast recursive search",
+    },
+    PackageSpec {
+        name: "fd",
+        aliases: &[],
+        nix_attr: "nixpkgs#fd",
+        binaries: &["fd"],
+        verify: &[VerifyCommand {
+            binary: "fd",
+            args: &["--version"],
+        }],
+        category: "search",
+        description: "Fast file finder",
+    },
+    PackageSpec {
+        name: "fzf",
+        aliases: &[],
+        nix_attr: "nixpkgs#fzf",
+        binaries: &["fzf"],
+        verify: &[VerifyCommand {
+            binary: "fzf",
+            args: &["--version"],
+        }],
+        category: "search",
+        description: "Fuzzy file finder",
+    },
+    // dev
+    PackageSpec {
+        name: "bat",
+        aliases: &[],
+        nix_attr: "nixpkgs#bat",
+        binaries: &["bat"],
+        verify: &[VerifyCommand {
+            binary: "bat",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "File viewer with syntax highlighting",
+    },
+    PackageSpec {
+        name: "bun",
+        aliases: &[],
+        nix_attr: "nixpkgs#bun",
+        binaries: &["bun"],
+        verify: &[VerifyCommand {
+            binary: "bun",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "JavaScript runtime and bundler",
+    },
+    PackageSpec {
+        name: "eza",
+        aliases: &[],
+        nix_attr: "nixpkgs#eza",
+        binaries: &["eza"],
+        verify: &[VerifyCommand {
+            binary: "eza",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Modern ls replacement",
+    },
+    PackageSpec {
+        name: "gh",
+        aliases: &[],
+        nix_attr: "nixpkgs#gh",
+        binaries: &["gh"],
+        verify: &[VerifyCommand {
+            binary: "gh",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "GitHub CLI",
+    },
+    PackageSpec {
+        name: "git-lfs",
+        aliases: &[],
+        nix_attr: "nixpkgs#git-lfs",
+        binaries: &["git-lfs"],
+        verify: &[VerifyCommand {
+            binary: "git-lfs",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Git large file storage",
+    },
+    PackageSpec {
+        name: "gnumake",
+        aliases: &["make"],
+        nix_attr: "nixpkgs#gnumake",
+        binaries: &["make"],
+        verify: &[VerifyCommand {
+            binary: "make",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Build automation",
+    },
+    PackageSpec {
+        name: "httpie",
+        aliases: &[],
+        nix_attr: "nixpkgs#httpie",
+        binaries: &["http"],
+        verify: &[VerifyCommand {
+            binary: "http",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "HTTP client",
+    },
+    PackageSpec {
+        name: "jq",
+        aliases: &[],
+        nix_attr: "nixpkgs#jq",
+        binaries: &["jq"],
+        verify: &[VerifyCommand {
+            binary: "jq",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "JSON processor",
+    },
+    PackageSpec {
+        name: "just",
+        aliases: &[],
+        nix_attr: "nixpkgs#just",
+        binaries: &["just"],
+        verify: &[VerifyCommand {
+            binary: "just",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Command runner",
+    },
+    PackageSpec {
+        name: "nodejs",
+        aliases: &["node"],
+        nix_attr: "nixpkgs#nodejs",
+        binaries: &["node", "npm"],
+        verify: &[VerifyCommand {
+            binary: "node",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "JavaScript runtime",
+    },
+    PackageSpec {
+        name: "openssl",
+        aliases: &[],
+        nix_attr: "nixpkgs#openssl",
+        binaries: &["openssl"],
+        verify: &[VerifyCommand {
+            binary: "openssl",
+            args: &["version"],
+        }],
+        category: "dev",
+        description: "Cryptography toolkit",
+    },
+    PackageSpec {
+        name: "pkg-config",
+        aliases: &[],
+        nix_attr: "nixpkgs#pkg-config",
+        binaries: &["pkg-config"],
+        verify: &[VerifyCommand {
+            binary: "pkg-config",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Package configuration",
+    },
+    PackageSpec {
+        name: "python3",
+        aliases: &["python"],
+        nix_attr: "nixpkgs#python3",
+        binaries: &["python3"],
+        verify: &[VerifyCommand {
+            binary: "python3",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Python interpreter",
+    },
+    PackageSpec {
+        name: "sqlite",
+        aliases: &[],
+        nix_attr: "nixpkgs#sqlite",
+        binaries: &["sqlite3"],
+        verify: &[VerifyCommand {
+            binary: "sqlite3",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "SQL database engine",
+    },
+    PackageSpec {
+        name: "tree",
+        aliases: &[],
+        nix_attr: "nixpkgs#tree",
+        binaries: &["tree"],
+        verify: &[VerifyCommand {
+            binary: "tree",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Directory tree viewer",
+    },
+    PackageSpec {
+        name: "uv",
+        aliases: &[],
+        nix_attr: "nixpkgs#uv",
+        binaries: &["uv"],
+        verify: &[VerifyCommand {
+            binary: "uv",
+            args: &["--version"],
+        }],
+        category: "dev",
+        description: "Python package manager",
+    },
+    // net
+    PackageSpec {
+        name: "wget",
+        aliases: &[],
+        nix_attr: "nixpkgs#wget",
+        binaries: &["wget"],
+        verify: &[VerifyCommand {
+            binary: "wget",
+            args: &["--version"],
+        }],
+        category: "net",
+        description: "URL downloader",
+    },
+    PackageSpec {
+        name: "curl",
+        aliases: &[],
+        nix_attr: "nixpkgs#curl",
+        binaries: &["curl"],
+        verify: &[VerifyCommand {
+            binary: "curl",
+            args: &["--version"],
+        }],
+        category: "net",
+        description: "URL transfer tool",
     },
 ];
 
 fn resolve_package(name: &str) -> Option<&'static PackageSpec> {
-    SUPPORTED_PACKAGES.iter().find(|p| p.name == name)
+    SUPPORTED_PACKAGES
+        .iter()
+        .find(|p| p.name == name || p.aliases.contains(&name))
 }
 
 /// A simple file-based mutex guard for mutation commands.
@@ -113,10 +410,15 @@ pub struct InstallReport {
 #[derive(Debug, Serialize)]
 pub struct PlanReport {
     pub package: String,
+    pub original_input: Option<String>,
     pub found: bool,
     pub description: String,
     pub would_create_snapshot: bool,
     pub attributes: Vec<String>,
+    pub nix_attr: String,
+    pub expected_binaries: Vec<String>,
+    pub verify_commands: Vec<String>,
+    pub rollback_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,7 +568,8 @@ fn locked_installable_for(
 }
 
 fn deterministic_package_from_resolution(
-    pkg: &str,
+    canonical_name: &str,
+    requested: &str,
     installable: &str,
     resolution: &root_nix::LockedPackageResolution,
 ) -> LockedPackageV2 {
@@ -276,7 +579,7 @@ fn deterministic_package_from_resolution(
         .clone()
         .or_else(|| {
             resolution.metadata.name.as_ref().and_then(|name| {
-                name.strip_prefix(&format!("{}-", pkg))
+                name.strip_prefix(&format!("{}-", canonical_name))
                     .map(|value| value.to_string())
             })
         })
@@ -326,24 +629,24 @@ fn deterministic_package_from_resolution(
         );
     }
 
-    let binaries = resolve_package(pkg)
+    let binaries = resolve_package(canonical_name)
         .map(|spec| {
             spec.binaries
                 .iter()
                 .map(|binary| (*binary).to_string())
                 .collect()
         })
-        .unwrap_or_else(|| vec![pkg.to_string()]);
+        .unwrap_or_else(|| vec![canonical_name.to_string()]);
 
     let mut package = LockedPackageV2 {
-        name: pkg.to_string(),
-        requested: pkg.to_string(),
+        name: canonical_name.to_string(),
+        requested: requested.to_string(),
         version,
-        attribute: pkg.to_string(),
+        attribute: canonical_name.to_string(),
         store_path: primary_store_path,
         binaries,
         installable: Some(installable.to_string()),
-        flake_attribute: Some(pkg.to_string()),
+        flake_attribute: Some(canonical_name.to_string()),
         drv_path: Some(
             resolution
                 .derivation
@@ -453,76 +756,98 @@ fn parse_attributes(search_output: &str) -> Vec<String> {
 }
 
 pub fn plan(adapter: &impl NixAdapter, pkg: &str) -> Result<PlanReport> {
-    // v0.1 allowlist enforcement
-    let _spec = resolve_package(pkg).ok_or_else(|| {
-        let supported: Vec<&str> = SUPPORTED_PACKAGES.iter().map(|p| p.name).collect();
+    let spec = resolve_package(pkg).ok_or_else(|| {
         anyhow::anyhow!(
-            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n  {}\n\nMore packages are coming soon.",
+            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
             pkg,
-            supported.join("\n  ")
+            format_supported_packages()
         )
     })?;
-    match adapter.search(pkg) {
+    let canonical = spec.name;
+    let original_input = if canonical != pkg {
+        Some(pkg.to_string())
+    } else {
+        None
+    };
+    match adapter.search(canonical) {
         Ok(description) => {
             let attributes = parse_attributes(&description);
             Ok(PlanReport {
-                package: pkg.to_string(),
+                package: canonical.to_string(),
+                original_input,
                 found: true,
                 description,
                 would_create_snapshot: true,
                 attributes,
+                nix_attr: spec.nix_attr.to_string(),
+                expected_binaries: spec.binaries.iter().map(|b| (*b).to_string()).collect(),
+                verify_commands: spec
+                    .verify
+                    .iter()
+                    .map(|v| format!("{} {}", v.binary, v.args.join(" ")))
+                    .collect(),
+                rollback_available: true,
             })
         }
         Err(root_nix::NixError::NotFound(_)) => Ok(PlanReport {
-            package: pkg.to_string(),
+            package: canonical.to_string(),
+            original_input,
             found: false,
             description: String::new(),
             would_create_snapshot: true,
             attributes: Vec::new(),
+            nix_attr: spec.nix_attr.to_string(),
+            expected_binaries: spec.binaries.iter().map(|b| (*b).to_string()).collect(),
+            verify_commands: spec
+                .verify
+                .iter()
+                .map(|v| format!("{} {}", v.binary, v.args.join(" ")))
+                .collect(),
+            rollback_available: true,
         }),
         Err(e) => Err(anyhow::anyhow!(e)),
     }
 }
 
 pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
-    // v0.1 allowlist enforcement
-    let _spec = resolve_package(pkg).ok_or_else(|| {
-        let supported: Vec<&str> = SUPPORTED_PACKAGES.iter().map(|p| p.name).collect();
+    let spec = resolve_package(pkg).ok_or_else(|| {
         anyhow::anyhow!(
-            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n  {}\n\nMore packages are coming soon.",
+            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
             pkg,
-            supported.join("\n  ")
+            format_supported_packages()
         )
     })?;
-    root_lockfile::init_root_dir()?;
+    let canonical = spec.name;
+    let original = pkg;
     let _guard = MutationGuard::acquire()?;
     let lock = get_or_create_lock_v2()?;
     let before_packages: Vec<String> = lock.packages.iter().map(|p| p.name.clone()).collect();
 
-    let (flake, installable) = locked_installable_for(adapter, pkg)?;
+    let (flake, installable) = locked_installable_for(adapter, canonical)?;
     let resolution = adapter
-        .resolve_locked_package(pkg, Some(&installable))
+        .resolve_locked_package(canonical, Some(&installable))
         .map_err(|e| anyhow::anyhow!(e))?;
-    let locked_package = deterministic_package_from_resolution(pkg, &installable, &resolution);
+    let locked_package =
+        deterministic_package_from_resolution(canonical, original, &installable, &resolution);
 
-    let snapshot = Snapshot::create_from_v2(&format!("before install {}", pkg), &lock)?;
+    let snapshot = Snapshot::create_from_v2(&format!("before install {}", canonical), &lock)?;
     let snapshot_id = snapshot.id.clone();
 
     adapter
-        .install_installable(pkg, &installable)
+        .install_installable(canonical, &installable)
         .map_err(|e| anyhow::anyhow!(e))?;
     verify_profile_contains_outputs(adapter, &locked_package.store_paths)?;
 
     let mut rootfile = get_or_create_rootfile()?;
     rootfile
         .packages
-        .insert(pkg.to_string(), locked_package.version.clone());
+        .insert(canonical.to_string(), locked_package.version.clone());
     save_rootfile(&rootfile)?;
 
     let mut v2_packages: Vec<LockedPackageV2> = lock
         .packages
         .iter()
-        .filter(|package| package.name != pkg)
+        .filter(|package| package.name != canonical)
         .cloned()
         .collect();
     v2_packages.push(locked_package.clone());
@@ -533,8 +858,8 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
     let _ = events::record_event(
         events::RootEventType::Install,
         events::RootEventStatus::Verified,
-        &format!("root install {}", pkg),
-        Some(pkg.to_string()),
+        &format!("root install {}", canonical),
+        Some(canonical.to_string()),
         Some(snapshot_id.clone()),
         None,
         Some("Package installed successfully".to_string()),
@@ -556,7 +881,7 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
     Ok(InstallReport {
         success: true,
         operation: "install",
-        package: pkg.to_string(),
+        package: canonical.to_string(),
         changed,
         unchanged,
         snapshot_id,
@@ -880,7 +1205,8 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
         let resolution = adapter
             .resolve_locked_package(name, Some(&installable))
             .map_err(|e| anyhow::anyhow!(e))?;
-        let locked_package = deterministic_package_from_resolution(name, &installable, &resolution);
+        let locked_package =
+            deterministic_package_from_resolution(name, name, &installable, &resolution);
         flake_for_lock = Some(flake);
         packages_locked.push(name.clone());
         v2_packages.push(locked_package);
@@ -916,6 +1242,63 @@ pub struct SyncReport {
     pub removed: Vec<String>,
     pub unchanged: Vec<String>,
     pub snapshot_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CatalogEntry {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub category: &'static str,
+    pub nix_attr: &'static str,
+    pub binaries: Vec<String>,
+    pub aliases: Vec<String>,
+    pub verify: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CatalogOutput {
+    pub packages: Vec<CatalogEntry>,
+}
+
+pub fn catalog() -> CatalogOutput {
+    CatalogOutput {
+        packages: SUPPORTED_PACKAGES
+            .iter()
+            .map(|p| CatalogEntry {
+                name: p.name,
+                description: p.description,
+                category: p.category,
+                nix_attr: p.nix_attr,
+                binaries: p.binaries.iter().map(|b| (*b).to_string()).collect(),
+                aliases: p.aliases.iter().map(|a| (*a).to_string()).collect(),
+                verify: p
+                    .verify
+                    .iter()
+                    .map(|v| format!("{} {}", v.binary, v.args.join(" ")))
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn format_supported_packages() -> String {
+    let mut lines = Vec::new();
+    let mut categories: Vec<(&str, Vec<&PackageSpec>)> = Vec::new();
+    for pkg in SUPPORTED_PACKAGES {
+        let idx = categories.iter().position(|(c, _)| *c == pkg.category);
+        if let Some(idx) = idx {
+            categories[idx].1.push(pkg);
+        } else {
+            categories.push((pkg.category, vec![pkg]));
+        }
+    }
+    for (category, pkgs) in &categories {
+        lines.push(format!("  {}:", category));
+        for pkg in pkgs {
+            lines.push(format!("    {:<12} {}", pkg.name, pkg.description));
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
@@ -1301,7 +1684,7 @@ mod tests {
             .resolve_locked_package("ripgrep", Some(&installable))
             .unwrap();
         let locked_pkg =
-            deterministic_package_from_resolution("ripgrep", &installable, &resolution);
+            deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution);
         let v2_lock = build_v2_lock(
             &RootLock {
                 version: 1,
@@ -1422,5 +1805,270 @@ mod tests {
         assert!(!new_pkg.store_paths.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── Package catalog tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_all_packages_have_unique_names() {
+        let mut names = std::collections::HashSet::new();
+        for pkg in SUPPORTED_PACKAGES {
+            assert!(
+                names.insert(pkg.name),
+                "Duplicate package name: {}",
+                pkg.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_packages_have_nix_attr() {
+        for pkg in SUPPORTED_PACKAGES {
+            assert!(
+                !pkg.nix_attr.is_empty(),
+                "Package {} has empty nix_attr",
+                pkg.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_packages_have_at_least_one_binary() {
+        for pkg in SUPPORTED_PACKAGES {
+            assert!(
+                !pkg.binaries.is_empty(),
+                "Package {} has no binaries",
+                pkg.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_packages_have_at_least_one_verify_command() {
+        for pkg in SUPPORTED_PACKAGES {
+            assert!(
+                !pkg.verify.is_empty(),
+                "Package {} has no verify commands",
+                pkg.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_verify_binary_matches_expected_binaries() {
+        for pkg in SUPPORTED_PACKAGES {
+            for verify_cmd in pkg.verify {
+                assert!(
+                    pkg.binaries.contains(&verify_cmd.binary),
+                    "Package {}: verify binary '{}' is not in expected binaries {:?}",
+                    pkg.name,
+                    verify_cmd.binary,
+                    pkg.binaries
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aliases_dont_collide_with_package_names() {
+        let names: std::collections::HashSet<&str> =
+            SUPPORTED_PACKAGES.iter().map(|p| p.name).collect();
+        let mut all_aliases = std::collections::HashSet::new();
+        for pkg in SUPPORTED_PACKAGES {
+            for alias in pkg.aliases {
+                assert!(
+                    !names.contains(alias),
+                    "Alias '{}' collides with package name",
+                    alias
+                );
+                assert!(all_aliases.insert(alias), "Duplicate alias: {}", alias);
+            }
+        }
+    }
+
+    #[test]
+    fn test_unsupported_package_is_rejected_before_nix_call() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let err = plan(&adapter, "nonexistent_pkg_xyz").unwrap_err();
+        assert!(err.to_string().contains("does not support"));
+    }
+
+    #[test]
+    fn test_unsupported_install_is_rejected_before_nix_call() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let err = install(&adapter, "nonexistent_pkg_xyz").unwrap_err();
+        assert!(err.to_string().contains("does not support"));
+    }
+
+    #[test]
+    fn test_catalog_includes_all_supported_packages() {
+        let output = catalog();
+        assert_eq!(output.packages.len(), SUPPORTED_PACKAGES.len());
+        for entry in &output.packages {
+            assert!(SUPPORTED_PACKAGES.iter().any(|p| p.name == entry.name));
+        }
+    }
+
+    #[test]
+    fn test_catalog_entries_have_required_fields() {
+        let output = catalog();
+        for entry in &output.packages {
+            assert!(!entry.name.is_empty());
+            assert!(!entry.description.is_empty());
+            assert!(!entry.category.is_empty());
+            assert!(!entry.nix_attr.is_empty());
+            assert!(!entry.binaries.is_empty());
+            assert!(!entry.verify.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_plan_with_alias_resolves_to_canonical() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "rg").unwrap();
+        assert_eq!(report.package, "ripgrep");
+        assert_eq!(report.original_input, Some("rg".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_canonical_name_has_no_original_input() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "ripgrep").unwrap();
+        assert_eq!(report.original_input, None);
+    }
+
+    #[test]
+    fn test_install_with_alias_stores_canonical_name() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "rg").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let rg_pkg = lock.packages.iter().find(|p| p.name == "ripgrep").unwrap();
+        assert_eq!(rg_pkg.name, "ripgrep");
+        assert_eq!(rg_pkg.requested, "rg");
+        assert_eq!(rg_pkg.attribute, "ripgrep");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_node_alias_stores_nodejs() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_node_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "node").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let node_pkg = lock.packages.iter().find(|p| p.name == "nodejs").unwrap();
+        assert_eq!(node_pkg.name, "nodejs");
+        assert_eq!(node_pkg.requested, "node");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_make_alias_stores_gnumake() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_make_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "make").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let make_pkg = lock.packages.iter().find(|p| p.name == "gnumake").unwrap();
+        assert_eq!(make_pkg.name, "gnumake");
+        assert_eq!(make_pkg.requested, "make");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_python_alias_stores_python3() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_python_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "python").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let py_pkg = lock.packages.iter().find(|p| p.name == "python3").unwrap();
+        assert_eq!(py_pkg.name, "python3");
+        assert_eq!(py_pkg.requested, "python");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_catalog_json_includes_aliases_and_verify() {
+        let output = catalog();
+        for entry in &output.packages {
+            if let Some(spec) = SUPPORTED_PACKAGES.iter().find(|p| p.name == entry.name) {
+                assert_eq!(entry.aliases.len(), spec.aliases.len());
+                assert_eq!(entry.verify.len(), spec.verify.len());
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_package_by_name() {
+        assert!(resolve_package("ffmpeg").is_some());
+        assert!(resolve_package("ripgrep").is_some());
+        assert!(resolve_package("jq").is_some());
+        assert!(resolve_package("poppler").is_some());
+        assert!(resolve_package("fd").is_some());
+        assert!(resolve_package("gh").is_some());
+    }
+
+    #[test]
+    fn test_resolve_package_by_alias() {
+        assert!(resolve_package("rg").is_some(), "Alias 'rg' should resolve");
+        assert!(
+            resolve_package("make").is_some(),
+            "Alias 'make' should resolve"
+        );
+        assert!(
+            resolve_package("node").is_some(),
+            "Alias 'node' should resolve"
+        );
+        assert!(
+            resolve_package("python").is_some(),
+            "Alias 'python' should resolve"
+        );
+    }
+
+    #[test]
+    fn test_error_message_shows_categories() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let err = plan(&adapter, "nonexistent_pkg_xyz").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("media:"));
+        assert!(msg.contains("search:"));
+        assert!(msg.contains("dev:"));
+        assert!(msg.contains("net:"));
     }
 }
