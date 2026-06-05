@@ -5,7 +5,20 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.3] - Unreleased
+## [0.1.4] - 2026-06-05
+
+### Fixed
+
+- **Install script SHA256 verification.** The computed hash included a
+  trailing `-` (stdin indicator) because `sha256sum` output was not piped
+  through `awk`. Both `sha256sum` and `shasum` are now grouped with parens
+  so the pipe always applies.
+- **`nix-command` and `flakes` experimental features.** All `nix` CLI
+  invocations now automatically pass
+  `--extra-experimental-features nix-command flakes`, so Root works on
+  fresh Nix installations without manual `nix.conf` configuration.
+
+## [0.1.3] - 2026-06-05
 
 ### Added
 
