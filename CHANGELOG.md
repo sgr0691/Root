@@ -5,6 +5,25 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-05
+
+### Fixed
+
+- **`nix profile install` deprecated in newer Nix.** Migrated to
+  `nix profile add` in both `install()` and `install_installable()`.
+  Nix 2.24+ emits a deprecation warning for `install` and some versions
+  reject it outright.
+- **Profile path conflict with Nix symlink management.** `init_root_dir()`
+  previously created `~/.root/profiles/default` as a plain directory, but
+  Nix's `--profile` flag manages that path as a symlink. This caused
+  `error: reading symbolic link ".../default": Invalid argument`. The
+  directory is no longer pre-created; broken symlinks and empty
+  directories at that path are cleaned up so Nix can manage it.
+- **Doctor false negatives on profile path.** The doctor's `exists()` /
+  `is_dir()` checks did not account for the profile path being a valid
+  symlink (the normal Nix-managed state). Now uses `symlink_metadata()`
+  to accept either a symlink or a directory.
+
 ## [0.1.4] - 2026-06-05
 
 ### Fixed

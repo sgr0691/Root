@@ -465,8 +465,29 @@ pub fn init_root_dir() -> Result<PathBuf> {
     fs::create_dir_all(root_dir.join("snapshots"))
         .context("Failed to create snapshots directory")?;
     fs::create_dir_all(root_dir.join("profiles")).context("Failed to create profiles directory")?;
-    fs::create_dir_all(root_dir.join("profiles").join("default"))
-        .context("Failed to create default profile directory")?;
+
+    // Don't pre-create profiles/default — Nix manages it as a symlink.
+    // If it exists as a broken symlink or empty directory, clean it up
+    // so Nix can create/replace it on first profile operation.
+    let default_profile = root_dir.join("profiles").join("default");
+    if let Ok(meta) = fs::symlink_metadata(&default_profile) {
+        if meta.file_type().is_symlink() {
+            // Broken symlink — remove it so Nix can recreate it
+            if fs::read_link(&default_profile).is_err() || !default_profile.exists() {
+                let _ = fs::remove_file(&default_profile);
+            }
+        } else if meta.is_dir() {
+            // Plain directory from older Root versions — remove if empty
+            // so Nix can manage it as a symlink
+            if fs::read_dir(&default_profile)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false)
+            {
+                let _ = fs::remove_dir(&default_profile);
+            }
+        }
+    }
+
     fs::create_dir_all(root_dir.join("logs")).context("Failed to create logs directory")?;
     fs::create_dir_all(root_dir.join("cache")).context("Failed to create cache directory")?;
     Ok(root_dir)

@@ -216,7 +216,7 @@ impl NixAdapter for RealNixAdapter {
         let pkg_arg = format!("nixpkgs#{}", package);
         let profile_str = self.profile_path.to_str().unwrap();
         Self::run_command(
-            &["profile", "install", &pkg_arg],
+            &["profile", "add", &pkg_arg],
             &["--profile", profile_str],
             Some(package),
         )
@@ -226,7 +226,7 @@ impl NixAdapter for RealNixAdapter {
     fn install_installable(&self, package: &str, installable: &str) -> Result<(), NixError> {
         let profile_str = self.profile_path.to_str().unwrap();
         Self::run_command(
-            &["profile", "install", installable],
+            &["profile", "add", installable],
             &["--profile", profile_str],
             Some(package),
         )

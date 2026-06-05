@@ -4,6 +4,7 @@ use root_nix::NixAdapter;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -88,7 +89,10 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
 
             // Specifically check the default profile subdirectory
             let default_profile = root_dir.join("profiles").join("default");
-            if !default_profile.exists() || !default_profile.is_dir() {
+            let profile_usable = fs::symlink_metadata(&default_profile)
+                .map(|meta| meta.file_type().is_symlink() || meta.is_dir())
+                .unwrap_or(false);
+            if !profile_usable {
                 report.issues.push(DoctorIssue {
                     severity: IssueSeverity::Warning,
                     category: "Repository".to_string(),
@@ -100,7 +104,10 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
             }
 
             let default_profile_bin = default_profile.join("bin");
-            if !default_profile_bin.exists() || !default_profile_bin.is_dir() {
+            let bin_usable = fs::symlink_metadata(&default_profile_bin)
+                .map(|meta| meta.file_type().is_symlink() || meta.is_dir())
+                .unwrap_or(false);
+            if !bin_usable {
                 report.issues.push(DoctorIssue {
                     severity: IssueSeverity::Warning,
                     category: "Repository".to_string(),
