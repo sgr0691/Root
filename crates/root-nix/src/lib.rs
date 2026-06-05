@@ -157,6 +157,8 @@ impl RealNixAdapter {
         package_context: Option<&str>,
     ) -> Result<String, NixError> {
         let output = Command::new("nix")
+            .arg("--extra-experimental-features")
+            .arg("nix-command flakes")
             .args(args)
             .args(extra_args)
             .output()
