@@ -138,7 +138,7 @@ download_archive "$CHECKSUM_URL" "$CHECKSUMS_FILE"
 if [ -f "$CHECKSUMS_FILE" ] && [ -s "$CHECKSUMS_FILE" ]; then
     EXPECTED_SHA=$(grep "${FILENAME}" "$CHECKSUMS_FILE" | head -n1 | awk '{print $1}')
     if [ -n "$EXPECTED_SHA" ]; then
-        COMPUTED_SHA=$(sha256sum < "${TMPDIR}/${FILENAME}" 2>/dev/null || shasum -a 256 < "${TMPDIR}/${FILENAME}" 2>/dev/null | awk '{print $1}')
+        COMPUTED_SHA=$( (sha256sum < "${TMPDIR}/${FILENAME}" 2>/dev/null || shasum -a 256 < "${TMPDIR}/${FILENAME}" 2>/dev/null) | awk '{print $1}')
         COMPUTED_SHA=$(echo "$COMPUTED_SHA" | tr -d ' ')
         if [ "$COMPUTED_SHA" != "$EXPECTED_SHA" ]; then
             echo "Error: SHA256 mismatch!" >&2
