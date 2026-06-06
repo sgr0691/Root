@@ -168,11 +168,18 @@ if [ ! -f "$BINARY_NAME" ]; then
     exit 1
 fi
 
+SUDO=""
 if [ ! -w "$INSTALL_DIR" ]; then
-    echo "Error: No write permission to ${INSTALL_DIR}. Try running with sudo." >&2
-    exit 1
+    if command -v sudo >/dev/null 2>&1; then
+        echo "No write permission to ${INSTALL_DIR}. Using sudo for installation..."
+        SUDO="sudo"
+    else
+        echo "Error: No write permission to ${INSTALL_DIR} and sudo not found." >&2
+        echo "Please run the script with: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | sudo sh" >&2
+        exit 1
+    fi
 fi
 
-cp "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
-chmod 755 "${INSTALL_DIR}/${BINARY_NAME}"
+$SUDO cp "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
+$SUDO chmod 755 "${INSTALL_DIR}/${BINARY_NAME}"
 echo "Installed root v${VERSION} to ${INSTALL_DIR}/${BINARY_NAME}"

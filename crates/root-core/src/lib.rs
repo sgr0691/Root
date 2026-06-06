@@ -572,7 +572,7 @@ fn deterministic_package_from_resolution(
     requested: &str,
     installable: &str,
     resolution: &root_nix::LockedPackageResolution,
-) -> LockedPackageV2 {
+) -> Result<LockedPackageV2> {
     let version = resolution
         .metadata
         .version
@@ -589,6 +589,14 @@ fn deterministic_package_from_resolution(
     let mut store_paths = BTreeMap::new();
     for output in &resolution.outputs {
         let path = output.path.to_string_lossy().to_string();
+        if path.ends_with(".drv") {
+            return Err(anyhow::anyhow!(
+                "Root resolved a derivation path but no realized output path for {}. \
+                 Expected an output store path, got: {}",
+                canonical_name,
+                path
+            ));
+        }
         let path_info = resolution
             .path_info
             .iter()
@@ -662,7 +670,7 @@ fn deterministic_package_from_resolution(
 
     let hash_input = serde_json::to_vec(&package).unwrap_or_default();
     package.content_hash = Some(root_lockfile::compute_sha256(&hash_input));
-    package
+    Ok(package)
 }
 
 fn legacy_package_from_v2(package: &LockedPackageV2) -> LockedPackage {
@@ -727,6 +735,15 @@ fn verify_profile_contains_outputs(
     adapter: &impl NixAdapter,
     outputs: &BTreeMap<String, String>,
 ) -> Result<()> {
+    for store_path in outputs.values() {
+        if store_path.ends_with(".drv") {
+            return Err(anyhow::anyhow!(
+                "Root resolved a derivation path but no realized output path. \
+                 Refusing to verify .drv path as an installed output: {}",
+                store_path
+            ));
+        }
+    }
     let profile_json = adapter
         .profile_list_json()
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -828,7 +845,7 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
         .resolve_locked_package(canonical, Some(&installable))
         .map_err(|e| anyhow::anyhow!(e))?;
     let locked_package =
-        deterministic_package_from_resolution(canonical, original, &installable, &resolution);
+        deterministic_package_from_resolution(canonical, original, &installable, &resolution)?;
 
     let snapshot = Snapshot::create_from_v2(&format!("before install {}", canonical), &lock)?;
     let snapshot_id = snapshot.id.clone();
@@ -1206,7 +1223,7 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
             .resolve_locked_package(name, Some(&installable))
             .map_err(|e| anyhow::anyhow!(e))?;
         let locked_package =
-            deterministic_package_from_resolution(name, name, &installable, &resolution);
+            deterministic_package_from_resolution(name, name, &installable, &resolution)?;
         flake_for_lock = Some(flake);
         packages_locked.push(name.clone());
         v2_packages.push(locked_package);
@@ -1684,7 +1701,8 @@ mod tests {
             .resolve_locked_package("ripgrep", Some(&installable))
             .unwrap();
         let locked_pkg =
-            deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution);
+            deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution)
+                .unwrap();
         let v2_lock = build_v2_lock(
             &RootLock {
                 version: 1,
@@ -2070,5 +2088,209 @@ mod tests {
         assert!(msg.contains("search:"));
         assert!(msg.contains("dev:"));
         assert!(msg.contains("net:"));
+    }
+
+    #[test]
+    fn test_deterministic_package_stores_drv_only_in_drv_path() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("drv_isolation");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir().unwrap();
+
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("ffmpeg").unwrap();
+        let (_flake, installable) = locked_installable_for(&adapter, "ffmpeg").unwrap();
+        let resolution = adapter
+            .resolve_locked_package("ffmpeg", Some(&installable))
+            .unwrap();
+
+        let locked =
+            deterministic_package_from_resolution("ffmpeg", "ffmpeg", &installable, &resolution)
+                .unwrap();
+
+        // drv_path must end in .drv
+        assert!(
+            locked.drv_path.as_ref().unwrap().ends_with(".drv"),
+            "drv_path should end in .drv: {:?}",
+            locked.drv_path
+        );
+
+        // store_path must NOT end in .drv
+        assert!(
+            !locked.store_path.ends_with(".drv"),
+            "store_path should not end in .drv: {}",
+            locked.store_path
+        );
+
+        // All store_paths values must NOT end in .drv
+        for (output_name, path) in &locked.store_paths {
+            assert!(
+                !path.ends_with(".drv"),
+                "store_paths[{}] should not end in .drv: {}",
+                output_name,
+                path
+            );
+        }
+
+        // All outputs store_path values must NOT end in .drv
+        for (output_name, output) in &locked.outputs {
+            assert!(
+                !output.store_path.ends_with(".drv"),
+                "outputs[{}].store_path should not end in .drv: {}",
+                output_name,
+                output.store_path
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_deterministic_package_rejects_drv_output_path() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("drv_reject");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir().unwrap();
+
+        // Build a resolution where outputs contain a .drv path
+        let drv_output = root_nix::BuildOutputPath {
+            output_name: "out".to_string(),
+            path: std::path::PathBuf::from("/nix/store/abc-ffmpeg-8.1.drv"),
+        };
+        let resolution = root_nix::LockedPackageResolution {
+            package: "ffmpeg".to_string(),
+            installable: "nixpkgs#ffmpeg".to_string(),
+            metadata: root_nix::PackageMetadata {
+                package: "ffmpeg".to_string(),
+                installable: "nixpkgs#ffmpeg".to_string(),
+                name: Some("ffmpeg-8.1".to_string()),
+                version: Some("8.1".to_string()),
+                description: None,
+                raw_json: "{}".to_string(),
+            },
+            derivation: root_nix::DerivationInfo {
+                package: "ffmpeg".to_string(),
+                installable: "nixpkgs#ffmpeg".to_string(),
+                derivation_path: std::path::PathBuf::from("/nix/store/abc-ffmpeg-8.1.drv"),
+                output_paths: vec![drv_output.clone()],
+            },
+            outputs: vec![drv_output],
+            path_info: vec![],
+        };
+
+        let result = deterministic_package_from_resolution(
+            "ffmpeg",
+            "ffmpeg",
+            "nixpkgs#ffmpeg",
+            &resolution,
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("derivation path"));
+        assert!(err_msg.contains("ffmpeg"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_verify_profile_rejects_drv_paths() {
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("ffmpeg").unwrap();
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert(
+            "out".to_string(),
+            "/nix/store/abc-ffmpeg-8.1.drv".to_string(),
+        );
+
+        let result = verify_profile_contains_outputs(&adapter, &outputs);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("derivation path"));
+        assert!(err_msg.contains(".drv"));
+    }
+
+    #[test]
+    fn test_verify_profile_succeeds_with_real_output_path() {
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("ffmpeg").unwrap();
+
+        // Build store_paths that match what the mock's profile_list_json returns.
+        // The mock uses mock_store_path(package) for profile entries.
+        // We just need to verify that non-.drv paths pass the guard and the
+        // profile check. Use the exact path the mock generates for "ffmpeg".
+        let mock_path = {
+            let token = format!("{:032x}", {
+                "ffmpeg".bytes().fold(0xcbf29ce484222325u64, |h, b| {
+                    (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+                })
+            });
+            let version = {
+                let n = "ffmpeg".bytes().fold(0xcbf29ce484222325u64, |h, b| {
+                    (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+                });
+                format!("0.1.{}", n % 1000)
+            };
+            format!("/nix/store/{}-ffmpeg-{}", token, version)
+        };
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert("out".to_string(), mock_path);
+
+        let result = verify_profile_contains_outputs(&adapter, &outputs);
+        assert!(result.is_ok(), "verify should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_lockfile_drv_and_output_path_separation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("lockfile_separation");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir().unwrap();
+
+        let adapter = MockNixAdapter::new(true);
+        adapter.install("ffmpeg").unwrap();
+        let (_flake, installable) = locked_installable_for(&adapter, "ffmpeg").unwrap();
+        let resolution = adapter
+            .resolve_locked_package("ffmpeg", Some(&installable))
+            .unwrap();
+        let locked =
+            deterministic_package_from_resolution("ffmpeg", "ffmpeg", &installable, &resolution)
+                .unwrap();
+
+        // Serialize to JSON and verify structure
+        let json = serde_json::to_string_pretty(&locked).unwrap();
+
+        // drv_path field must contain .drv
+        assert!(
+            json.contains("\"drv_path\""),
+            "lockfile should have drv_path field"
+        );
+        let drv_val = locked.drv_path.as_ref().unwrap();
+        assert!(drv_val.ends_with(".drv"), "drv_path value must end in .drv");
+
+        // storePath field must NOT contain .drv
+        assert!(
+            !locked.store_path.ends_with(".drv"),
+            "storePath must not end in .drv"
+        );
+
+        // storePaths values must NOT contain .drv
+        for path in locked.store_paths.values() {
+            assert!(!path.ends_with(".drv"), "storePaths must not end in .drv");
+        }
+
+        // outputs storePath values must NOT contain .drv
+        for output in locked.outputs.values() {
+            assert!(
+                !output.store_path.ends_with(".drv"),
+                "outputs storePath must not end in .drv"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

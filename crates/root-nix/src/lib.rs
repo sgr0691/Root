@@ -655,7 +655,7 @@ fn json_array_strings(json: &str, field: &str) -> Vec<String> {
 fn json_store_paths(json: &str) -> Vec<String> {
     extract_json_strings(json)
         .into_iter()
-        .filter(|value| value.starts_with("/nix/store/"))
+        .filter(|value| value.starts_with("/nix/store/") && !value.ends_with(".drv"))
         .collect()
 }
 
@@ -897,5 +897,28 @@ mod tests {
                 "/nix/store/ref-two".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_json_store_paths_filters_drv_paths() {
+        let json = r#"[{"drvPath":"/nix/store/abc-ffmpeg-8.1.drv","outputs":{"out":"/nix/store/xyz-ffmpeg-8.1"}}]"#;
+
+        let paths = json_store_paths(json);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/nix/store/xyz-ffmpeg-8.1");
+        assert!(!paths[0].ends_with(".drv"));
+    }
+
+    #[test]
+    fn test_json_store_paths_multiple_outputs_with_drv() {
+        let json = r#"[{"drvPath":"/nix/store/abc-pkg.drv","outputs":{"out":"/nix/store/out-pkg","dev":"/nix/store/dev-pkg"}}]"#;
+
+        let paths = json_store_paths(json);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/nix/store/out-pkg");
+        assert_eq!(paths[1], "/nix/store/dev-pkg");
+        for p in &paths {
+            assert!(!p.ends_with(".drv"));
+        }
     }
 }
