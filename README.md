@@ -1,4 +1,4 @@
-# Root v0.1.3
+# Root v0.1.6
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -141,6 +141,15 @@ root history
 root rollback --last
 ```
 
+## What v0.1.6 Changed
+
+v0.1.6 is the **Drv Path Fix & Install UX** release:
+
+- **Fixed `.drv` path leak in output verification** — `nix build --no-link --print-out-paths --json` returns both drv paths and output paths. The `.drv` path was being assigned as the `"out"` output, causing verification to fail with `Installed profile did not contain locked Nix store path ... .drv`. Now `.drv` paths are filtered out during extraction, and guards reject them at every layer.
+- **Install script auto-elevation** — `curl ... | sh` now automatically uses `sudo` for the install step when needed. No more `sudo curl ... | sh` confusion or "No write permission" errors.
+- **Early rejection of `.drv` output paths** — If a resolved package only has a `.drv` path, Root fails with a clear internal error instead of a misleading profile-verification failure.
+- **Verification guard** — `verify_profile_contains_outputs` rejects `.drv` paths before checking the profile, with a clear error message.
+
 ## What v0.1.3 Changed
 
 v0.1.3 is the **Curated Package Catalog** release:
@@ -170,7 +179,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.1.3)
+## Limitations (v0.1.6)
 
 - **Curated catalog only.** Arbitrary `root install <anything>` is not yet
   supported. Unsupported packages are rejected with a clear categorized
@@ -186,7 +195,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.1.3 public
+The CLI includes additional commands that are **not part of the v0.1.6 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
