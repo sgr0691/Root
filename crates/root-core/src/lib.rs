@@ -326,6 +326,249 @@ pub const SUPPORTED_PACKAGES: &[PackageSpec] = &[
         category: "net",
         description: "URL transfer tool",
     },
+    // language
+    PackageSpec {
+        name: "go",
+        aliases: &["golang"],
+        nix_attr: "nixpkgs#go",
+        binaries: &["go"],
+        verify: &[VerifyCommand {
+            binary: "go",
+            args: &["version"],
+        }],
+        category: "language",
+        description: "Go programming language toolchain",
+    },
+    PackageSpec {
+        name: "rustup",
+        aliases: &[],
+        nix_attr: "nixpkgs#rustup",
+        binaries: &["rustup"],
+        verify: &[VerifyCommand {
+            binary: "rustup",
+            args: &["--version"],
+        }],
+        category: "language",
+        description: "Rust toolchain installer and manager",
+    },
+    // database
+    PackageSpec {
+        name: "postgresql",
+        aliases: &["postgres"],
+        nix_attr: "nixpkgs#postgresql",
+        binaries: &["psql", "postgres"],
+        verify: &[
+            VerifyCommand {
+                binary: "psql",
+                args: &["--version"],
+            },
+            VerifyCommand {
+                binary: "postgres",
+                args: &["--version"],
+            },
+        ],
+        category: "database",
+        description: "PostgreSQL database server and CLI tools",
+    },
+    PackageSpec {
+        name: "redis",
+        aliases: &[],
+        nix_attr: "nixpkgs#redis",
+        binaries: &["redis-server", "redis-cli"],
+        verify: &[
+            VerifyCommand {
+                binary: "redis-server",
+                args: &["--version"],
+            },
+            VerifyCommand {
+                binary: "redis-cli",
+                args: &["--version"],
+            },
+        ],
+        category: "database",
+        description: "Redis server and command-line client",
+    },
+    // infrastructure
+    PackageSpec {
+        name: "terraform",
+        aliases: &["tf"],
+        nix_attr: "nixpkgs#terraform",
+        binaries: &["terraform"],
+        verify: &[VerifyCommand {
+            binary: "terraform",
+            args: &["version"],
+        }],
+        category: "infrastructure",
+        description: "Infrastructure as code CLI",
+    },
+    PackageSpec {
+        name: "kubectl",
+        aliases: &["kube"],
+        nix_attr: "nixpkgs#kubectl",
+        binaries: &["kubectl"],
+        verify: &[VerifyCommand {
+            binary: "kubectl",
+            args: &["version", "--client"],
+        }],
+        category: "infrastructure",
+        description: "Kubernetes command-line tool",
+    },
+    PackageSpec {
+        name: "helm",
+        aliases: &[],
+        nix_attr: "nixpkgs#kubernetes-helm",
+        binaries: &["helm"],
+        verify: &[VerifyCommand {
+            binary: "helm",
+            args: &["version", "--short"],
+        }],
+        category: "infrastructure",
+        description: "Kubernetes package manager",
+    },
+    PackageSpec {
+        name: "k9s",
+        aliases: &[],
+        nix_attr: "nixpkgs#k9s",
+        binaries: &["k9s"],
+        verify: &[VerifyCommand {
+            binary: "k9s",
+            args: &["version"],
+        }],
+        category: "infrastructure",
+        description: "Terminal UI for Kubernetes clusters",
+    },
+    PackageSpec {
+        name: "docker-client",
+        aliases: &["docker"],
+        nix_attr: "nixpkgs#docker-client",
+        binaries: &["docker"],
+        verify: &[VerifyCommand {
+            binary: "docker",
+            args: &["--version"],
+        }],
+        category: "infrastructure",
+        description: "Docker CLI client",
+    },
+    // security
+    PackageSpec {
+        name: "age",
+        aliases: &[],
+        nix_attr: "nixpkgs#age",
+        binaries: &["age", "age-keygen"],
+        verify: &[
+            VerifyCommand {
+                binary: "age",
+                args: &["--version"],
+            },
+            VerifyCommand {
+                binary: "age-keygen",
+                args: &["--version"],
+            },
+        ],
+        category: "security",
+        description: "Simple modern file encryption tool",
+    },
+    PackageSpec {
+        name: "sops",
+        aliases: &[],
+        nix_attr: "nixpkgs#sops",
+        binaries: &["sops"],
+        verify: &[VerifyCommand {
+            binary: "sops",
+            args: &["--version"],
+        }],
+        category: "security",
+        description: "Editor for encrypted secrets",
+    },
+    // editor
+    PackageSpec {
+        name: "neovim",
+        aliases: &["nvim"],
+        nix_attr: "nixpkgs#neovim",
+        binaries: &["nvim"],
+        verify: &[VerifyCommand {
+            binary: "nvim",
+            args: &["--version"],
+        }],
+        category: "editor",
+        description: "Modern Vim-based text editor",
+    },
+    // terminal
+    PackageSpec {
+        name: "tmux",
+        aliases: &[],
+        nix_attr: "nixpkgs#tmux",
+        binaries: &["tmux"],
+        verify: &[VerifyCommand {
+            binary: "tmux",
+            args: &["-V"],
+        }],
+        category: "terminal",
+        description: "Terminal multiplexer",
+    },
+    // git
+    PackageSpec {
+        name: "git-delta",
+        aliases: &["delta"],
+        nix_attr: "nixpkgs#git-delta",
+        binaries: &["delta"],
+        verify: &[VerifyCommand {
+            binary: "delta",
+            args: &["--version"],
+        }],
+        category: "git",
+        description: "Syntax-highlighted Git diff viewer.",
+    },
+    // terminal
+    PackageSpec {
+        name: "zoxide",
+        aliases: &["z"],
+        nix_attr: "nixpkgs#zoxide",
+        binaries: &["zoxide"],
+        verify: &[VerifyCommand {
+            binary: "zoxide",
+            args: &["--version"],
+        }],
+        category: "terminal",
+        description: "Smarter directory navigation for the terminal.",
+    },
+    PackageSpec {
+        name: "direnv",
+        aliases: &[],
+        nix_attr: "nixpkgs#direnv",
+        binaries: &["direnv"],
+        verify: &[VerifyCommand {
+            binary: "direnv",
+            args: &["version"],
+        }],
+        category: "terminal",
+        description: "Automatically loads and unloads environment variables per directory.",
+    },
+    PackageSpec {
+        name: "starship",
+        aliases: &[],
+        nix_attr: "nixpkgs#starship",
+        binaries: &["starship"],
+        verify: &[VerifyCommand {
+            binary: "starship",
+            args: &["--version"],
+        }],
+        category: "terminal",
+        description: "Cross-shell customizable prompt.",
+    },
+    // git
+    PackageSpec {
+        name: "lazygit",
+        aliases: &["lg"],
+        nix_attr: "nixpkgs#lazygit",
+        binaries: &["lazygit"],
+        verify: &[VerifyCommand {
+            binary: "lazygit",
+            args: &["--version"],
+        }],
+        category: "git",
+        description: "Terminal UI for Git workflows.",
+    },
 ];
 
 fn resolve_package(name: &str) -> Option<&'static PackageSpec> {
@@ -2041,6 +2284,239 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_with_golang_alias_resolves_to_go() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "golang").unwrap();
+        assert_eq!(report.package, "go");
+        assert_eq!(report.original_input, Some("golang".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_postgres_alias_resolves_to_postgresql() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "postgres").unwrap();
+        assert_eq!(report.package, "postgresql");
+        assert_eq!(report.original_input, Some("postgres".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_tf_alias_resolves_to_terraform() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "tf").unwrap();
+        assert_eq!(report.package, "terraform");
+        assert_eq!(report.original_input, Some("tf".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_kube_alias_resolves_to_kubectl() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "kube").unwrap();
+        assert_eq!(report.package, "kubectl");
+        assert_eq!(report.original_input, Some("kube".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_docker_alias_resolves_to_docker_client() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "docker").unwrap();
+        assert_eq!(report.package, "docker-client");
+        assert_eq!(report.original_input, Some("docker".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_nvim_alias_resolves_to_neovim() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "nvim").unwrap();
+        assert_eq!(report.package, "neovim");
+        assert_eq!(report.original_input, Some("nvim".to_string()));
+    }
+
+    #[test]
+    fn test_install_with_golang_alias_stores_go() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_golang_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "golang").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock.packages.iter().find(|p| p.name == "go").unwrap();
+        assert_eq!(pkg.name, "go");
+        assert_eq!(pkg.requested, "golang");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_docker_alias_stores_docker_client() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_docker_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "docker").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock
+            .packages
+            .iter()
+            .find(|p| p.name == "docker-client")
+            .unwrap();
+        assert_eq!(pkg.name, "docker-client");
+        assert_eq!(pkg.requested, "docker");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_tf_alias_stores_terraform() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_tf_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "tf").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock
+            .packages
+            .iter()
+            .find(|p| p.name == "terraform")
+            .unwrap();
+        assert_eq!(pkg.name, "terraform");
+        assert_eq!(pkg.requested, "tf");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_nvim_alias_stores_neovim() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_nvim_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "nvim").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock.packages.iter().find(|p| p.name == "neovim").unwrap();
+        assert_eq!(pkg.name, "neovim");
+        assert_eq!(pkg.requested, "nvim");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_plan_with_delta_alias_resolves_to_git_delta() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "delta").unwrap();
+        assert_eq!(report.package, "git-delta");
+        assert_eq!(report.original_input, Some("delta".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_z_alias_resolves_to_zoxide() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "z").unwrap();
+        assert_eq!(report.package, "zoxide");
+        assert_eq!(report.original_input, Some("z".to_string()));
+    }
+
+    #[test]
+    fn test_plan_with_lg_alias_resolves_to_lazygit() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let report = plan(&adapter, "lg").unwrap();
+        assert_eq!(report.package, "lazygit");
+        assert_eq!(report.original_input, Some("lg".to_string()));
+    }
+
+    #[test]
+    fn test_install_with_delta_alias_stores_git_delta() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_delta_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "delta").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock
+            .packages
+            .iter()
+            .find(|p| p.name == "git-delta")
+            .unwrap();
+        assert_eq!(pkg.name, "git-delta");
+        assert_eq!(pkg.requested, "delta");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_z_alias_stores_zoxide() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_z_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "z").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock.packages.iter().find(|p| p.name == "zoxide").unwrap();
+        assert_eq!(pkg.name, "zoxide");
+        assert_eq!(pkg.requested, "z");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_install_with_lg_alias_stores_lazygit() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_lg_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "lg").unwrap();
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let pkg = lock.packages.iter().find(|p| p.name == "lazygit").unwrap();
+        assert_eq!(pkg.name, "lazygit");
+        assert_eq!(pkg.requested, "lg");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_catalog_json_includes_aliases_and_verify() {
         let output = catalog();
         for entry in &output.packages {
@@ -2059,6 +2535,24 @@ mod tests {
         assert!(resolve_package("poppler").is_some());
         assert!(resolve_package("fd").is_some());
         assert!(resolve_package("gh").is_some());
+        assert!(resolve_package("go").is_some());
+        assert!(resolve_package("rustup").is_some());
+        assert!(resolve_package("postgresql").is_some());
+        assert!(resolve_package("redis").is_some());
+        assert!(resolve_package("terraform").is_some());
+        assert!(resolve_package("kubectl").is_some());
+        assert!(resolve_package("helm").is_some());
+        assert!(resolve_package("k9s").is_some());
+        assert!(resolve_package("docker-client").is_some());
+        assert!(resolve_package("age").is_some());
+        assert!(resolve_package("sops").is_some());
+        assert!(resolve_package("neovim").is_some());
+        assert!(resolve_package("tmux").is_some());
+        assert!(resolve_package("git-delta").is_some());
+        assert!(resolve_package("zoxide").is_some());
+        assert!(resolve_package("direnv").is_some());
+        assert!(resolve_package("starship").is_some());
+        assert!(resolve_package("lazygit").is_some());
     }
 
     #[test]
@@ -2076,6 +2570,33 @@ mod tests {
             resolve_package("python").is_some(),
             "Alias 'python' should resolve"
         );
+        assert!(
+            resolve_package("golang").is_some(),
+            "Alias 'golang' should resolve"
+        );
+        assert!(
+            resolve_package("postgres").is_some(),
+            "Alias 'postgres' should resolve"
+        );
+        assert!(resolve_package("tf").is_some(), "Alias 'tf' should resolve");
+        assert!(
+            resolve_package("kube").is_some(),
+            "Alias 'kube' should resolve"
+        );
+        assert!(
+            resolve_package("docker").is_some(),
+            "Alias 'docker' should resolve"
+        );
+        assert!(
+            resolve_package("nvim").is_some(),
+            "Alias 'nvim' should resolve"
+        );
+        assert!(
+            resolve_package("delta").is_some(),
+            "Alias 'delta' should resolve"
+        );
+        assert!(resolve_package("z").is_some(), "Alias 'z' should resolve");
+        assert!(resolve_package("lg").is_some(), "Alias 'lg' should resolve");
     }
 
     #[test]
@@ -2088,6 +2609,13 @@ mod tests {
         assert!(msg.contains("search:"));
         assert!(msg.contains("dev:"));
         assert!(msg.contains("net:"));
+        assert!(msg.contains("language:"));
+        assert!(msg.contains("database:"));
+        assert!(msg.contains("infrastructure:"));
+        assert!(msg.contains("security:"));
+        assert!(msg.contains("editor:"));
+        assert!(msg.contains("terminal:"));
+        assert!(msg.contains("git:"));
     }
 
     #[test]

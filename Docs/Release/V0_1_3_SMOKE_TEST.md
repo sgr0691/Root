@@ -1,6 +1,6 @@
-# Root v0.1.3 — Smoke Test
+# Root v0.1.3 — Smoke Test (updated for v0.1.8)
 
-This document contains the manual smoke-test checklist for Root v0.1.3,
+This document contains the manual smoke-test checklist for Root,
 including alias resolution and catalog coverage.
 
 Run each test on a **clean machine** (or a throw-away home directory) to
@@ -369,3 +369,258 @@ root rollback --last --json
 - Valid JSON is printed to stdout.
 - Errors include `success: false` and a `message` field.
 - Exit codes match the CLI error code table.
+
+---
+
+## 14. Package Catalog Expansion (v0.1.7)
+
+### Plan new packages
+
+```bash
+root plan install go
+```
+
+**Expected:**
+- Shows "Install plan for go".
+- Nix attr shows `nixpkgs#go`.
+- Binary listed as `go`.
+- Verify listed as `go version`.
+
+```bash
+root plan install postgres
+```
+
+**Expected:**
+- Shows "Install plan for postgres → postgresql".
+- Nix attr shows `nixpkgs#postgresql`.
+- Binaries listed as `psql, postgres`.
+- Verify listed as `psql --version, postgres --version`.
+
+```bash
+root plan install tf
+```
+
+**Expected:**
+- Shows "Install plan for tf → terraform".
+- Nix attr shows `nixpkgs#terraform`.
+
+```bash
+root plan install docker
+```
+
+**Expected:**
+- Shows "Install plan for docker → docker-client".
+- Nix attr shows `nixpkgs#docker-client`.
+
+```bash
+root plan install nvim
+```
+
+**Expected:**
+- Shows "Install plan for nvim → neovim".
+- Nix attr shows `nixpkgs#neovim`.
+
+### Install and verify new packages
+
+```bash
+root install go
+root verify go
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `go version` passes (exit code 0).
+
+```bash
+root install terraform
+root verify terraform
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `terraform version` passes.
+
+```bash
+root install kubectl
+root verify kubectl
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `kubectl version --client` passes.
+
+```bash
+root install docker
+root verify docker-client
+```
+
+**Expected:**
+- Install succeeds (Docker CLI only, not daemon).
+- Verify shows `docker --version` passes.
+
+```bash
+root install tmux
+root verify tmux
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `tmux -V` passes.
+
+### Alias resolution via install
+
+```bash
+root install golang
+```
+
+**Expected:**
+- Installs `go` (canonical name) via Nix.
+- Lockfile stores `"name": "go"`, `"requested": "golang"`.
+
+```bash
+root install kube
+```
+
+**Expected:**
+- Installs `kubectl` (canonical name).
+- Lockfile stores `"name": "kubectl"`, `"requested": "kube"`.
+
+### Category listing in error messages
+
+```bash
+root plan install nonexistent_pkg
+```
+
+**Expected:**
+- Error "does not support 'nonexistent_pkg' yet".
+- Lists all 11 categories with packages:
+  - media: ffmpeg, imagemagick, poppler
+  - search: ripgrep, fd, fzf
+  - dev: bat, bun, eza, ...
+  - language: go, rustup
+  - database: postgresql, redis
+  - infrastructure: terraform, kubectl, helm, k9s, docker-client
+  - security: age, sops
+  - editor: neovim
+  - git: git-delta, lazygit
+  - terminal: tmux, zoxide, direnv, starship
+  - net: curl, wget
+
+---
+
+## 15. Developer Productivity Tools (v0.1.8)
+
+### Plan new aliases
+
+```bash
+root plan install delta
+```
+
+**Expected:**
+- Shows "Install plan for delta → git-delta".
+- Nix attr shows `nixpkgs#git-delta`.
+- Binary listed as `delta`.
+- Verify listed as `delta --version`.
+
+```bash
+root plan install z
+```
+
+**Expected:**
+- Shows "Install plan for z → zoxide".
+- Nix attr shows `nixpkgs#zoxide`.
+
+```bash
+root plan install lg
+```
+
+**Expected:**
+- Shows "Install plan for lg → lazygit".
+- Nix attr shows `nixpkgs#lazygit`.
+
+### Plan new packages by canonical name
+
+```bash
+root plan install git-delta
+root plan install zoxide
+root plan install direnv
+root plan install starship
+root plan install lazygit
+```
+
+**Expected:**
+- Each shows its canonical name in the plan header.
+- Nix attr matches `nixpkgs#<name>`.
+
+### Install and verify
+
+```bash
+root install git-delta
+root verify git-delta
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `delta --version` passes.
+
+```bash
+root install zoxide
+root verify zoxide
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `zoxide --version` passes.
+
+```bash
+root install direnv
+root verify direnv
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `direnv version` passes.
+
+```bash
+root install starship
+root verify starship
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `starship --version` passes.
+
+```bash
+root install lazygit
+root verify lazygit
+```
+
+**Expected:**
+- Install succeeds.
+- Verify shows `lazygit --version` passes.
+
+### Alias resolution via install
+
+```bash
+root install delta
+```
+
+**Expected:**
+- Installs `git-delta` (canonical name) via Nix.
+- Lockfile stores `"name": "git-delta"`, `"requested": "delta"`.
+
+```bash
+root install z
+```
+
+**Expected:**
+- Installs `zoxide` (canonical name).
+- Lockfile stores `"name": "zoxide"`, `"requested": "z"`.
+
+```bash
+root install lg
+```
+
+**Expected:**
+- Installs `lazygit` (canonical name).
+- Lockfile stores `"name": "lazygit"`, `"requested": "lg"`.

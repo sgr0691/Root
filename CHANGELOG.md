@@ -5,6 +5,54 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-06-06
+
+### Added
+
+- **Developer productivity tools.** From 37 to 42 curated packages. New
+  category: `git`. New packages: git-delta, zoxide, direnv, starship, lazygit.
+- **New aliases.** `delta` → git-delta, `z` → zoxide, `lg` → lazygit.
+- **Alias regression tests.** Plan and install tests for delta, z, and lg
+  aliases, verifying canonical name storage in the lockfile.
+- **Category expansion tests.** Error message category listing test now
+  covers all eleven categories.
+
+### Changed
+
+- **README updated.** Expanded package table with new `git` category, new
+  terminal packages (zoxide, direnv, starship), v0.1.8 changelog section,
+  updated limitations.
+- **CHANGELOG.md** — this entry.
+- **Smoke test docs updated.** Added manual tests for new packages and
+  aliases.
+
+## [0.1.7] - 2026-06-06
+
+### Added
+
+- **Package catalog expansion.** From 24 to 37 curated packages across ten
+  categories. New categories: `language`, `database`, `infrastructure`,
+  `security`, `editor`, `terminal`. New packages: go, rustup, postgresql,
+  redis, terraform, kubectl, helm, k9s, docker-client, age, sops, neovim, tmux.
+- **New aliases.** `golang` → go, `postgres` → postgresql, `tf` → terraform,
+  `kube` → kubectl, `docker` → docker-client, `nvim` → neovim.
+- **Verification coverage improvements.** Package-specific verify commands
+  for go (`go version`), terraform (`terraform version`), kubectl
+  (`kubectl version --client`), helm (`helm version --short`), and
+  tmux (`tmux -V`).
+- **Alias regression tests.** Plan and install tests for every new alias,
+  verifying canonical name storage in the lockfile.
+- **Category expansion tests.** Error message category listing test now
+  covers all ten categories.
+
+### Changed
+
+- **README updated.** Expanded package table with six new categories,
+  v0.1.7 changelog section, updated limitations.
+- **CHANGELOG.md** — this entry.
+- **Smoke test docs updated.** Added manual tests for new packages and
+  aliases.
+
 ## [0.1.5] - 2026-06-05
 
 ### Fixed
@@ -136,9 +184,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Known Limitations
 
-- Curated catalog only (24 packages). Arbitrary `root install <anything>`
+- Curated catalog only (42 packages). Arbitrary `root install <anything>`
   is not yet supported. Unsupported packages are rejected with a clear
   categorized message.
+- `docker-client` installs the Docker CLI only, not Docker Desktop or a
+  Docker daemon. A separate daemon is needed to run containers.
 - Rollback applies only to Root-managed packages. Cannot undo Homebrew or
   manual changes.
 - Nix must be pre-installed or installed via `root init --install-nix`.
@@ -157,6 +207,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for all packages in Rootfile.
 - `root sync` no longer works with v2 lockfiles. Use `root install` and
   `root rollback` instead.
+
+### Upgrading from 0.1.7 to 0.1.8
+
+- No breaking changes. Existing v2 lockfiles, snapshots, and events are
+  fully compatible.
+- The curated catalog expanded from 37 to 42 packages. New category: `git`.
+  New aliases: `delta`, `z`, `lg`.
+
+### Upgrading from 0.1.6 to 0.1.7
+
+- No breaking changes. Existing v2 lockfiles, snapshots, and events are
+  fully compatible.
+- The curated catalog expanded from 24 to 37 packages with six new
+  categories. Run `root catalog` to browse the full list.
+- New aliases: `golang`, `postgres`, `tf`, `kube`, `docker`, `nvim`.
 
 ### Upgrading from 0.1.2 to 0.1.3
 

@@ -1,4 +1,4 @@
-# Root v0.1.6
+# Root v0.1.8
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -53,7 +53,7 @@ can be undone — all without learning Nix.
 
 ## Supported Packages
 
-Root curates a catalog of 24 developer CLI tools across four categories:
+Root curates a catalog of 42 developer CLI tools across eleven categories:
 
 ### media
 | Package | Description | Nix attribute | Binaries | Verify |
@@ -94,6 +94,52 @@ Root curates a catalog of 24 developer CLI tools across four categories:
 |---------|-------------|---------------|----------|--------|
 | curl | URL transfer tool | nixpkgs#curl | curl | curl --version |
 | wget | URL downloader | nixpkgs#wget | wget | wget --version |
+
+### language
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| go | Go programming language toolchain | nixpkgs#go | go | go version |
+| rustup | Rust toolchain installer and manager | nixpkgs#rustup | rustup | rustup --version |
+
+### database
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| postgresql | PostgreSQL database server and CLI tools | nixpkgs#postgresql | psql, postgres | psql --version, postgres --version |
+| redis | Redis server and command-line client | nixpkgs#redis | redis-server, redis-cli | redis-server --version, redis-cli --version |
+
+### infrastructure
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| terraform | Infrastructure as code CLI | nixpkgs#terraform | terraform | terraform version |
+| kubectl | Kubernetes command-line tool | nixpkgs#kubectl | kubectl | kubectl version --client |
+| helm | Kubernetes package manager | nixpkgs#kubernetes-helm | helm | helm version --short |
+| k9s | Terminal UI for Kubernetes clusters | nixpkgs#k9s | k9s | k9s version |
+| docker-client | Docker CLI client (not Docker Desktop/daemon) | nixpkgs#docker-client | docker | docker --version |
+
+### security
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| age | Simple modern file encryption tool | nixpkgs#age | age, age-keygen | age --version, age-keygen --version |
+| sops | Editor for encrypted secrets | nixpkgs#sops | sops | sops --version |
+
+### editor
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| neovim | Modern Vim-based text editor | nixpkgs#neovim | nvim | nvim --version |
+
+### git
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| git-delta | Syntax-highlighted Git diff viewer | nixpkgs#git-delta | delta | delta --version |
+| lazygit | Terminal UI for Git workflows | nixpkgs#lazygit | lazygit | lazygit --version |
+
+### terminal
+| Package | Description | Nix attribute | Binaries | Verify |
+|---------|-------------|---------------|----------|--------|
+| tmux | Terminal multiplexer | nixpkgs#tmux | tmux | tmux -V |
+| zoxide | Smarter directory navigation for the terminal | nixpkgs#zoxide | zoxide | zoxide --version |
+| direnv | Automatically loads and unloads environment variables per directory | nixpkgs#direnv | direnv | direnv version |
+| starship | Cross-shell customizable prompt | nixpkgs#starship | starship | starship --version |
 
 Each package's metadata (Nix attribute, expected binaries, and verification
 commands) is defined in the `PackageSpec` catalog inside `root-core`. New
@@ -141,6 +187,50 @@ root history
 root rollback --last
 ```
 
+## What v0.1.8 Changed
+
+v0.1.8 is the **Developer Productivity Tools** release:
+
+- **Expanded catalog** — From 37 to 42 curated packages. New category: `git`.
+  New packages: git-delta, zoxide, direnv, starship, lazygit.
+- **New aliases** — `delta` → git-delta, `z` → zoxide, `lg` → lazygit.
+- **Developer productivity section** — These five tools are frequently
+  recommended in terminal, Git, and productivity workflows.
+- **Alias regression tests** — Plan and install tests for every new alias.
+
+### Example usage
+
+```bash
+root plan install delta
+root plan install z
+root plan install lg
+
+root install git-delta
+root install zoxide
+root install direnv
+root install starship
+root install lazygit
+```
+
+## What v0.1.7 Changed
+
+v0.1.7 is the **Package Catalog Expansion** release:
+
+- **Expanded catalog** — From 24 to 37 curated packages across ten categories.
+  New categories: `language`, `database`, `infrastructure`, `security`, `editor`,
+  `terminal`. New packages: go, rustup, postgresql, redis, terraform, kubectl,
+  helm, k9s, docker-client, age, sops, neovim, tmux.
+- **`docker-client`** — Installs the Docker CLI only, not Docker Desktop or a
+  Docker daemon.
+- **New aliases** — `golang` → go, `postgres` → postgresql, `tf` → terraform,
+  `kube` → kubectl, `docker` → docker-client, `nvim` → neovim.
+- **Verification improvements** — Package-specific verify commands added for
+  go (`go version`), terraform (`terraform version`), kubectl
+  (`kubectl version --client`), helm (`helm version --short`), and
+  tmux (`tmux -V`).
+- **Alias regression tests** — Every new alias has plan and install tests
+  verifying canonical name storage in the lockfile.
+
 ## What v0.1.6 Changed
 
 v0.1.6 is the **Drv Path Fix & Install UX** release:
@@ -179,11 +269,14 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.1.6)
+## Limitations (v0.1.8)
 
-- **Curated catalog only.** Arbitrary `root install <anything>` is not yet
+- **Curated catalog only.** Root supports a curated catalog only — 42 packages
+  across eleven categories. Arbitrary `root install <anything>` is not yet
   supported. Unsupported packages are rejected with a clear categorized
   message.
+- **`docker-client` installs the Docker CLI only**, not Docker Desktop or a
+  Docker daemon. You need a separate Docker daemon to run containers.
 - **Rollback applies only to Root-managed packages.** Root cannot undo
   changes made by Homebrew, manual installs, or other tools.
 - **Nix must be installed.** Root manages a Nix profile but does not
@@ -195,7 +288,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.1.6 public
+The CLI includes additional commands that are **not part of the v0.1.8 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
