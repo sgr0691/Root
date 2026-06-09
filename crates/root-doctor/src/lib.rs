@@ -45,22 +45,36 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
                 report.issues.push(DoctorIssue {
                     severity: IssueSeverity::Error,
                     category: "Nix".to_string(),
-                    description: "Nix is not installed or not available on PATH.".to_string(),
+                    description: "Nix is not installed or not available on PATH.\n\nRoot uses Nix to build packages from source in isolated environments.\nNix provides reproducible, deterministic builds that Root pins in its lockfile."
+                        .to_string(),
                     suggestion:
-                        "Run `root init --install-nix` to install Nix automatically, or install from https://nixos.org/download/."
+                        "Install Nix with: root init --install-nix\nOr install manually from:\n  https://nixos.org/download/\n\nAfter installing, run: root doctor"
                             .to_string(),
                 });
             }
         }
         Err(e) => {
-            report.issues.push(DoctorIssue {
-                severity: IssueSeverity::Error,
-                category: "Nix".to_string(),
-                description: format!("Failed to check Nix availability: {}", e),
-                suggestion:
-                    "Run `nix --version` to verify Nix is working, then run `root doctor` again."
+            let msg = format!("{}", e);
+            if msg.contains("experimental feature") && msg.contains("not enabled") {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description: "Nix is installed but experimental features are not enabled.\nRoot needs 'nix-command' and 'flakes' experimental features."
                         .to_string(),
-            });
+                    suggestion:
+                        "Add this to ~/.config/nix/nix.conf:\n  experimental-features = nix-command flakes\n\nThen run: root doctor"
+                            .to_string(),
+                });
+            } else {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description: format!("Failed to check Nix availability: {}", e),
+                    suggestion:
+                        "Run `nix --version` to verify Nix is working, then run `root doctor` again."
+                            .to_string(),
+                });
+            }
         }
     }
 

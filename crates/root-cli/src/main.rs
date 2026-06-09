@@ -6,7 +6,7 @@ use std::process;
 #[derive(Parser, Debug)]
 #[command(
     name = "root",
-    about = "Root v0.1.3 - curated package manager for developer CLI tools",
+    about = "Root v0.1.9 - curated package manager for developer CLI tools",
     version
 )]
 struct Cli {
@@ -249,13 +249,14 @@ fn main() {
                 }
                 if r.nix_detected {
                     msg.push_str("\n\nRoot is ready.");
-                    msg.push_str("\n\nTry Root in 60 seconds:");
-                    msg.push_str("\n  root doctor           Check system health");
-                    msg.push_str("\n  root install ffmpeg   Install your first package");
-                    msg.push_str("\n  root history          View history");
-                    msg.push_str("\n  root verify ffmpeg    Verify package");
-                    msg.push_str("\n  root rollback --last  Undo the install");
-                    msg.push_str("\n\nRun `root catalog` to see all supported packages.");
+                    msg.push_str("\n  Nix provides reproducible builds and package isolation.");
+                    msg.push_str("\n  Next steps:");
+                    msg.push_str("\n    root doctor           Check system health");
+                    msg.push_str("\n    root install ffmpeg   Install your first package");
+                    msg.push_str("\n    root history          View history");
+                    msg.push_str("\n    root verify ffmpeg    Verify package binaries");
+                    msg.push_str("\n    root rollback --last  Undo the install");
+                    msg.push_str("\n\n  Run `root catalog` to see all 42 supported packages.");
                 }
                 msg
             });
@@ -287,7 +288,7 @@ fn main() {
                             }
                         }
                     } else if !cli.json {
-                        eprintln!("\nNix is required for Root.\n\nTo install Nix, run:\n  root init --install-nix\n\nOr install Nix manually from:\n  https://nixos.org/download/");
+                        eprintln!("\nNix is required but was not found. Root uses Nix to build and isolate packages.\n\nTo install Nix, run:\n  root init --install-nix\n\nOr install Nix manually from:\n  https://nixos.org/download/\n\nAfter installing Nix, run:\n  root doctor   Check that everything works\n  root install ffmpeg    Install your first package");
                     }
                 }
             }
@@ -514,17 +515,17 @@ fn main() {
                 } else {
                     println!("Root health check\n");
                     if report.issues.is_empty() {
-                        println!("✓ Nix available");
+                        println!("✓ Nix available — Root uses Nix for deterministic builds");
                         println!("✓ Root profile ready");
                         println!("✓ Event ledger writable");
                         println!("✓ No issues detected");
                         println!("\nRoot is ready.");
-                        println!("\nRun `root catalog` to see all supported packages.");
                         println!("\nNext steps:");
                         println!("  root install ffmpeg    Install your first package");
                         println!("  root history           View snapshot history");
                         println!("  root verify ffmpeg     Verify package binaries");
                         println!("  root rollback --last   Undo the last change");
+                        println!("\nRun `root catalog` to see all 42 supported packages.");
                     } else {
                         for issue in &report.issues {
                             let icon = match issue.severity {

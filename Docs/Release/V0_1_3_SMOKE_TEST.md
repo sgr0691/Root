@@ -1,4 +1,4 @@
-# Root v0.1.3 — Smoke Test (updated for v0.1.8)
+# Root v0.1.3 — Smoke Test (updated for v0.1.9)
 
 This document contains the manual smoke-test checklist for Root,
 including alias resolution and catalog coverage.

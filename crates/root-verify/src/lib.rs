@@ -53,6 +53,30 @@ fn get_override(binary: &str) -> Option<VerifyOverride> {
             args: &["version"],
             expected_contains: None,
         }),
+        "go" => Some(VerifyOverride {
+            args: &["version"],
+            expected_contains: None,
+        }),
+        "terraform" => Some(VerifyOverride {
+            args: &["version"],
+            expected_contains: None,
+        }),
+        "kubectl" => Some(VerifyOverride {
+            args: &["version", "--client"],
+            expected_contains: None,
+        }),
+        "helm" => Some(VerifyOverride {
+            args: &["version", "--short"],
+            expected_contains: None,
+        }),
+        "tmux" => Some(VerifyOverride {
+            args: &["-V"],
+            expected_contains: None,
+        }),
+        "direnv" => Some(VerifyOverride {
+            args: &["version"],
+            expected_contains: None,
+        }),
         _ => None,
     }
 }
@@ -83,6 +107,24 @@ fn package_default_binaries(package: &str) -> Option<&'static [&'static str]> {
         "nodejs" => Some(&["node", "npm"]),
         "bun" => Some(&["bun"]),
         "uv" => Some(&["uv"]),
+        "go" => Some(&["go"]),
+        "rustup" => Some(&["rustup"]),
+        "postgresql" => Some(&["psql", "postgres"]),
+        "redis" => Some(&["redis-server", "redis-cli"]),
+        "terraform" => Some(&["terraform"]),
+        "kubectl" => Some(&["kubectl"]),
+        "helm" => Some(&["helm"]),
+        "k9s" => Some(&["k9s"]),
+        "docker-client" => Some(&["docker"]),
+        "age" => Some(&["age", "age-keygen"]),
+        "sops" => Some(&["sops"]),
+        "neovim" => Some(&["nvim"]),
+        "tmux" => Some(&["tmux"]),
+        "git-delta" => Some(&["delta"]),
+        "zoxide" => Some(&["zoxide"]),
+        "direnv" => Some(&["direnv"]),
+        "starship" => Some(&["starship"]),
+        "lazygit" => Some(&["lazygit"]),
         _ => None,
     }
 }
@@ -130,7 +172,7 @@ pub fn verify_package(pkg_name: &str) -> Result<VerificationReport> {
             resolve_binary_path(binary, &root_dir, lock.profile.path.as_deref())
         else {
             let msg = format!(
-                "Binary '{}' for package '{}' was not found on PATH or in ~/.root/profiles/default/bin.",
+                "Binary '{}' for package '{}' was not found in Root profile at ~/.root/profiles/default/bin.",
                 binary, pkg_name
             );
             bin_res.error_message = Some(msg.clone());
@@ -141,7 +183,6 @@ pub fn verify_package(pkg_name: &str) -> Result<VerificationReport> {
         bin_res.resolved_path = Some(binary_path.to_string_lossy().to_string());
 
         if let Some(over) = get_override(binary) {
-            // Run with package-specific override
             bin_res.attempted_args = over.args.iter().map(|arg| (*arg).to_string()).collect();
             match run_binary(&binary_path, over.args) {
                 Ok((code, out, err)) => {
@@ -174,7 +215,6 @@ pub fn verify_package(pkg_name: &str) -> Result<VerificationReport> {
                 }
             }
         } else {
-            // Generic strategy: try --help, then -h, then --version
             let strategies = vec![
                 vec!["--version"],
                 vec!["-version"],
@@ -194,7 +234,6 @@ pub fn verify_package(pkg_name: &str) -> Result<VerificationReport> {
                         let lower_out = out.to_lowercase();
                         let lower_err = err.to_lowercase();
 
-                        // Consider successful if exit code is 0, or output matches typical help terms
                         let has_help_keywords = lower_out.contains("usage")
                             || lower_out.contains("options")
                             || lower_out.contains("help")
@@ -281,17 +320,6 @@ fn resolve_binary_path(
         }
     }
 
-    find_on_path(binary)
-}
-
-fn find_on_path(binary: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    for path in std::env::split_paths(&paths) {
-        let bin_path = path.join(binary);
-        if is_executable_candidate(&bin_path) {
-            return Some(bin_path);
-        }
-    }
     None
 }
 
@@ -530,6 +558,30 @@ mod tests {
             .unwrap()
             .contains("profiles/default/bin/ffmpeg"));
         assert!(report.binaries[0].stdout.contains("root"));
+
+        // Verify that a missing Root profile binary fails even if a shadow binary exists on PATH
+        let shadow_only_bin_dir = temp_home.join("shadow-only");
+        fs::create_dir_all(&shadow_only_bin_dir).unwrap();
+        let shadow_only = shadow_only_bin_dir.join("missing-from-root");
+        fs::write(&shadow_only, "#!/bin/sh\necho 'shadow'\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&shadow_only).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&shadow_only, permissions).unwrap();
+        }
+        std::env::set_var("PATH", shadow_only_bin_dir);
+        let mut shadow_lock = lock.clone();
+        shadow_lock.packages[0].binaries = vec!["missing-from-root".to_string()];
+        shadow_lock
+            .write_to_file(&root_dir.join("root.lock"))
+            .unwrap();
+        let shadow_report = verify_package("ffmpeg").unwrap();
+        assert!(!shadow_report.success);
+        assert!(shadow_report
+            .errors
+            .iter()
+            .any(|e| e.contains("not found in Root profile")));
     }
 
     #[test]
@@ -566,5 +618,117 @@ mod tests {
             .iter()
             .any(|e| e.contains("has no binary metadata")));
         assert!(report.binaries.is_empty());
+    }
+
+    #[test]
+    fn test_verify_missing_profile_binary_fails_even_if_global_exists() {
+        let (_temp_home, _guard) =
+            setup_test_home("test_verify_missing_profile_binary_fails_even_if_global_exists");
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        let global_bin_dir = std::env::temp_dir().join("root_test_global_bin");
+        fs::create_dir_all(&global_bin_dir).unwrap();
+        std::env::set_var("PATH", &global_bin_dir);
+        let global_bin = global_bin_dir.join("ffmpeg");
+        fs::write(&global_bin, "#!/bin/sh\necho 'ffmpeg global version'\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&global_bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&global_bin, perms).unwrap();
+        }
+
+        let lock = RootLock {
+            version: root_lockfile::ROOT_LOCK_SCHEMA_VERSION,
+            platform: "aarch64-darwin".into(),
+            nixpkgs: NixpkgsConfig {
+                rev: "some-rev".into(),
+                source: "github:NixOS/nixpkgs".into(),
+            },
+            packages: vec![LockedPackage {
+                name: "ffmpeg".to_string(),
+                requested: "ffmpeg".to_string(),
+                version: "7.1".to_string(),
+                attribute: "ffmpeg".to_string(),
+                store_path: root_lockfile::derive_store_path("ffmpeg", "7.1"),
+                binaries: vec!["ffmpeg".to_string()],
+            }],
+        };
+        lock.write_to_file(&root_dir.join("root.lock")).unwrap();
+
+        let report = verify_package("ffmpeg").unwrap();
+        assert!(!report.success);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("not found in Root profile")),
+            "Should fail because ffmpeg is only on global PATH, not in Root profile: {:?}",
+            report.errors
+        );
+        let _ = fs::remove_dir_all(&global_bin_dir);
+    }
+
+    #[test]
+    fn test_verify_multi_binary_package_reports_each_binary() {
+        let (_temp_home, _guard) = setup_test_home("test_verify_multi_binary");
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        std::env::set_var(
+            "PATH",
+            root_dir.join("profiles").join("default").join("bin"),
+        );
+        write_fake_binary(
+            &root_dir,
+            "pdftotext",
+            "#!/bin/sh\necho 'usage: pdftotext'\n",
+        );
+        write_fake_binary(&root_dir, "pdfinfo", "#!/bin/sh\necho 'usage: pdfinfo'\n");
+
+        let lock = RootLock {
+            version: root_lockfile::ROOT_LOCK_SCHEMA_VERSION,
+            platform: "aarch64-darwin".into(),
+            nixpkgs: NixpkgsConfig {
+                rev: "some-rev".into(),
+                source: "github:NixOS/nixpkgs".into(),
+            },
+            packages: vec![LockedPackage {
+                name: "poppler".to_string(),
+                requested: "poppler".to_string(),
+                version: "24.08.0".to_string(),
+                attribute: "poppler".to_string(),
+                store_path: root_lockfile::derive_store_path("poppler", "24.08.0"),
+                binaries: vec!["pdftotext".to_string(), "pdfinfo".to_string()],
+            }],
+        };
+        lock.write_to_file(&root_dir.join("root.lock")).unwrap();
+        let report = verify_package("poppler").unwrap();
+        assert_eq!(report.binaries.len(), 2);
+        assert_eq!(report.binaries[0].binary, "pdftotext");
+        assert_eq!(report.binaries[1].binary, "pdfinfo");
+    }
+
+    #[test]
+    fn test_verify_non_standard_args_are_correct() {
+        let cases: Vec<(&str, &[&str])> = vec![
+            ("go", &["version"]),
+            ("terraform", &["version"]),
+            ("kubectl", &["version", "--client"]),
+            ("helm", &["version", "--short"]),
+            ("tmux", &["-V"]),
+            ("direnv", &["version"]),
+        ];
+        for (binary, expected_args) in &cases {
+            let over = get_override(binary);
+            assert!(
+                over.is_some(),
+                "Expected override for '{}' but none found",
+                binary
+            );
+            assert_eq!(
+                over.unwrap().args.to_vec(),
+                *expected_args,
+                "Args mismatch for '{}'",
+                binary
+            );
+        }
     }
 }

@@ -2068,6 +2068,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn test_rollback_event_recorded_on_success() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("rollback_event_success");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ffmpeg").unwrap();
+        let report = rollback_last(&adapter).unwrap();
+        assert!(report.success);
+
+        let hist = history().unwrap();
+        assert!(hist.events.iter().any(|event| {
+            event.event_type == events::RootEventType::Rollback
+                && event.status == events::RootEventStatus::Completed
+        }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_rollback_failure_preserves_lockfile_and_rootfile() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("rollback_failure_preserve");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ffmpeg").unwrap();
+
+        let before_lock = get_or_create_lock_v2().unwrap();
+        let before_rootfile = get_or_create_rootfile().unwrap();
+
+        // Break the adapter by making it unavailable
+        // We simulate failure by rolling back into a situation where
+        // the adapter can't produce required outputs.
+        let adapter2 = MockNixAdapter::new(false);
+
+        let result = rollback_last(&adapter2);
+        assert!(result.is_err());
+
+        // Lockfile and Rootfile must be unchanged
+        let after_lock = get_or_create_lock_v2().unwrap();
+        let after_rootfile = get_or_create_rootfile().unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&before_lock).unwrap(),
+            serde_json::to_string(&after_lock).unwrap(),
+            "Lockfile must not change after failed rollback"
+        );
+        assert_eq!(
+            serde_json::to_string(&before_rootfile).unwrap(),
+            serde_json::to_string(&after_rootfile).unwrap(),
+            "Rootfile must not change after failed rollback"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ─── Package catalog tests ────────────────────────────────────────────
 
     #[test]

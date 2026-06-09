@@ -182,6 +182,25 @@ impl RealNixAdapter {
         if stderr.contains("error: no outputs found") {
             return Err(NixError::NotFound(package_context.to_string()));
         }
+        if stderr.contains("experimental feature") && stderr.contains("is not enabled") {
+            return Err(NixError::Generic(
+                "Nix experimental features 'nix-command' and 'flakes' are required.\n\
+                 To enable them, add this to ~/.config/nix/nix.conf:\n\
+                 experimental-features = nix-command flakes\n\n\
+                 Or edit /etc/nix/nix.conf to include the same line."
+                    .to_string(),
+            ));
+        }
+        if stderr.contains("error: reading symbolic link") || stderr.contains("Invalid argument") {
+            return Err(NixError::Generic(
+                "Nix profile path issue detected.\n\
+                 This can happen when Root's profile path (~/.root/profiles/default)\n\
+                 conflicts with Nix's symlink management.\n\n\
+                 Run:  root doctor\n\
+                 To repair, try:  rm -rf ~/.root/profiles/default && root init"
+                    .to_string(),
+            ));
+        }
         Err(NixError::Generic(stderr.trim().to_string()))
     }
 

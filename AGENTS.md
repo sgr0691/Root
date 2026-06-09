@@ -17,6 +17,50 @@ CI order: `fmt` → `clippy` → `test` (`.github/workflows/ci.yml`).
 
 Release: tag `v*` triggers cross-compile for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`.
 
+## Release Process
+
+### Prerequisites (before tagging)
+
+1. Bump `version` in root `Cargo.toml` (workspace-level).
+2. Build and verify the binary:
+   ```bash
+   cargo build && target/debug/root --version
+   ```
+3. Run full CI locally:
+   ```bash
+   cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
+   ```
+4. Update CHANGELOG.md with changes since last release (under `## [X.Y.Z] - YYYY-MM-DD`).
+5. Update README.md if new features or notable fixes exist:
+   - Add a `## What vX.Y.Z Changed` section after the current top section
+   - Update the title `# Root vX.Y.Z` (if minor or major release)
+   - Update `## Limitations (vX.Y.Z)` section header
+   - Update experimental-commands prefix to match new version
+6. Update `Docs/Release/V0_1_3_SMOKE_TEST.md` title if the smoke test doc still references the old version.
+7. Commit the version bump.
+8. Tag and push:
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+### Version Consistency Checklist
+
+Before tagging, verify all of these match the **new** version (X.Y.Z):
+
+| Source | Check | Expected |
+|--------|-------|----------|
+| `Cargo.toml` | `workspace.package.version` | `X.Y.Z` |
+| `Cargo.lock` | `root-cli`, `root-core`, `root-doctor`, `root-lockfile`, `root-nix`, `root-snapshot`, `root-verify`, `root-agent` | `X.Y.Z` (run `cargo metadata --no-deps --format-version 1`) |
+| `cargo build && root --version` | Binary banner | contains `X.Y.Z` |
+| `CHANGELOG.md` | Has `## [X.Y.Z]` entry | present |
+| `README.md` | Title `# Root vX.Y.Z` | correct |
+| `README.md` | `## Limitations (vX.Y.Z)` | correct |
+| `README.md` | `not part of the vX.Y.Z public surface` | correct |
+| `Docs/Release/V0_1_3_SMOKE_TEST.md` | Title version reference | up to date |
+| Git tag | `git tag` output | `vX.Y.Z` exists after push |
+
+> **Policy note:** Old release notes in README (e.g., "What v0.1.8 Changed") are historical documentation and must not be rewritten. Git tags must never be deleted or recreated. If a tag was missed, accept the gap — do not retroactively create it.
+
 ## Testing quirks
 
 - `MockNixAdapter` (in `root-nix`) lets unit tests run without real Nix.

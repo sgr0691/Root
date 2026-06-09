@@ -1,4 +1,4 @@
-# Root v0.1.8
+# Root v0.1.9
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -187,6 +187,31 @@ root history
 root rollback --last
 ```
 
+## What v0.1.9 Changed
+
+v0.1.9 is the **Stability & Hardening** release:
+
+- **Verification no longer falls back to global PATH** — `root verify` requires
+  binaries in `~/.root/profiles/default/bin`. If a binary is missing there,
+  verification fails even if it exists elsewhere on PATH.
+- **Non-standard tool verification fixed** — Correct arguments for `go version`,
+  `terraform version`, `kubectl version --client`, `helm version --short`,
+  `tmux -V`, and `direnv version`.
+- **Nix error normalization improved** — Clear messages for missing experimental
+  features and profile symlink conflicts.
+- **Onboarding improved** — Doctor and init now explain why Root needs Nix
+  and how to resolve common issues.
+- **Release versioning hardened** — All version references now consistent.
+- **Linux compatibility documented** — Investigation doc at `Docs/Platform/`.
+
+### Example fixes
+
+```bash
+# Verification now correctly uses Root profile, not PATH
+root verify go           # uses ~/.root/profiles/default/bin/go
+root verify terraform    # uses `terraform version` not `--version`
+```
+
 ## What v0.1.8 Changed
 
 v0.1.8 is the **Developer Productivity Tools** release:
@@ -269,7 +294,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.1.8)
+## Limitations (v0.1.9)
 
 - **Curated catalog only.** Root supports a curated catalog only — 42 packages
   across eleven categories. Arbitrary `root install <anything>` is not yet
@@ -288,7 +313,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.1.8 public
+The CLI includes additional commands that are **not part of the v0.1.9 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
