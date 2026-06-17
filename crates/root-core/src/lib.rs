@@ -4,11 +4,13 @@ use root_lockfile::{
     NixpkgsConfig, NixpkgsConfigV2, RootLock, RootLockV2, Rootfile, ROOT_LOCK_SCHEMA_VERSION,
 };
 use root_nix::NixAdapter;
+use root_sandbox::SandboxProvider;
 use root_snapshot::{list_snapshot_summaries, list_snapshots, Snapshot, SnapshotSummary};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifyCommand {
@@ -571,15 +573,23 @@ pub const SUPPORTED_PACKAGES: &[PackageSpec] = &[
     },
 ];
 
+type UpdateTarget = (String, &'static PackageSpec);
+
 fn resolve_package(name: &str) -> Option<&'static PackageSpec> {
     SUPPORTED_PACKAGES
         .iter()
         .find(|p| p.name == name || p.aliases.contains(&name))
 }
 
-/// A simple file-based mutex guard for mutation commands.
-/// Acquires the lock by atomically creating `~/.root/root.lockfile`.
-/// Released on Drop.
+/// A file-based mutex guard for mutation commands.
+///
+/// Acquires the lock by atomically creating `~/.root/root.lockfile`
+/// with the current PID and a timestamp. On contention, checks whether
+/// the lock-holding process is still alive. If the process is dead,
+/// the stale lock is removed and re-acquisition is attempted.
+///
+/// Released on Drop (which removes the lock file).
+#[derive(Debug)]
 struct MutationGuard {
     lock_path: PathBuf,
 }
@@ -589,22 +599,73 @@ impl MutationGuard {
         let dir = root_lockfile::init_root_dir()?;
         let lock_path = dir.join("root.lockfile");
 
-        OpenOptions::new()
+        let pid = std::process::id();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let lock_content = format!("{}\n{}\n", pid, now);
+
+        match Self::try_acquire(&lock_path, &lock_content) {
+            Ok(()) => Ok(Self { lock_path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Stale lock recovery: read the lock file, check if the PID is alive
+                match Self::check_stale_lock(&lock_path) {
+                    Ok(true) => Err(anyhow::anyhow!(
+                        "Another Root mutation is in progress (PID {}).\n\
+                         If this is unexpected, delete ~/.root/root.lockfile and try again.",
+                        pid
+                    )),
+                    Ok(false) => {
+                        // Stale lock — remove it and retry
+                        let _ = std::fs::remove_file(&lock_path);
+                        Self::try_acquire(&lock_path, &lock_content).with_context(|| {
+                            "Failed to acquire mutation lock after recovering stale lock"
+                        })?;
+                        Ok(Self { lock_path })
+                    }
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Lock file ~/.root/root.lockfile exists and could not be read.\n\
+                         Delete it manually and try again."
+                    )),
+                }
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to acquire mutation lock: {}", e)),
+        }
+    }
+
+    fn try_acquire(lock_path: &Path, content: &str) -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&lock_path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    anyhow::anyhow!(
-                        "Another Root mutation is in progress.\n\
-                         If this is unexpected, delete ~/.root/root.lockfile and try again."
-                    )
-                } else {
-                    anyhow::anyhow!("Failed to acquire lock: {}", e)
-                }
-            })?;
+            .open(lock_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    }
 
-        Ok(Self { lock_path })
+    /// Returns `Ok(true)` if the lock holder's PID is still alive,
+    /// `Ok(false)` if the process is dead (stale), or `Err` if the lock
+    /// file is unreadable or malformed.
+    fn check_stale_lock(lock_path: &Path) -> Result<bool> {
+        let mut content = String::new();
+        std::fs::File::open(lock_path)
+            .and_then(|mut f| f.read_to_string(&mut content))
+            .map_err(|_| anyhow::anyhow!("Cannot read lock file"))?;
+
+        let pid_str = content.lines().next().unwrap_or("").trim();
+        let lock_pid: u32 = pid_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Malformed lock file (invalid PID)"))?;
+
+        // Check if the PID is alive (signal 0 test, portable on Unix)
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(lock_pid.to_string())
+            .output()
+            .map_err(|_| anyhow::anyhow!("Cannot check process liveness"))?;
+
+        Ok(status.status.success())
     }
 }
 
@@ -616,6 +677,10 @@ impl Drop for MutationGuard {
 
 pub mod brew;
 pub mod events;
+pub mod execution;
+pub mod policy;
+
+pub use execution::{run, RunReport, RunRequest};
 
 #[derive(Debug, Serialize)]
 pub struct ListPackage {
@@ -665,6 +730,25 @@ pub struct PlanReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SearchMatch {
+    pub name: &'static str,
+    pub aliases: Vec<String>,
+    pub category: &'static str,
+    pub description: &'static str,
+    pub nix_attr: &'static str,
+    pub binaries: Vec<String>,
+    pub verify: Vec<String>,
+    pub matched_fields: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchOutput {
+    pub query: String,
+    pub matches: Vec<SearchMatch>,
+    pub supported_count: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RemoveReport {
     pub success: bool,
     pub package: String,
@@ -684,6 +768,93 @@ pub struct RollbackReport {
 pub struct HistoryOutput {
     pub snapshots: Vec<SnapshotSummary>,
     pub events: Vec<events::RootEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateReport {
+    pub success: bool,
+    pub requested: Option<String>,
+    pub updated: Vec<String>,
+    pub unchanged: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+    pub snapshot_id: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PermissionsReport {
+    pub success: bool,
+    pub path: String,
+    pub source: &'static str,
+    pub policy: policy::RootPolicy,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyApplyReport {
+    pub success: bool,
+    pub path: String,
+    pub version: u32,
+}
+
+pub fn permissions() -> Result<PermissionsReport> {
+    root_lockfile::init_root_dir()?;
+    let path = policy::policy_path()?;
+    let (policy, configured) = policy::read_policy()?;
+    Ok(PermissionsReport {
+        success: true,
+        path: path.to_string_lossy().to_string(),
+        source: if configured { "configured" } else { "default" },
+        policy,
+    })
+}
+
+pub fn apply_policy(source: &Path) -> Result<PolicyApplyReport> {
+    let _guard = MutationGuard::acquire()?;
+    let (policy, destination) = policy::apply_policy(source)?;
+    events::record_policy_event(
+        "root policy apply",
+        events::RootEventStatus::Completed,
+        "applied",
+        format!("Activated policy from {}", source.display()),
+    )?;
+    Ok(PolicyApplyReport {
+        success: true,
+        path: destination.to_string_lossy().to_string(),
+        version: policy.version,
+    })
+}
+
+pub(crate) fn enforce_policy(action: policy::PolicyAction, subject: Option<&str>) -> Result<()> {
+    let (active_policy, _) = policy::read_policy()?;
+    let decision = policy::evaluate(&active_policy, action, subject);
+    let status = if decision.allowed {
+        events::RootEventStatus::Completed
+    } else {
+        events::RootEventStatus::Failed
+    };
+    events::record_policy_event(
+        &format!("policy check {}", action.as_str()),
+        status,
+        if decision.allowed {
+            "allowed"
+        } else {
+            "denied"
+        },
+        decision.reason.clone(),
+    )?;
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Policy denied {}{}: {}",
+            action.as_str(),
+            subject
+                .map(|value| format!(" '{}'", value))
+                .unwrap_or_default(),
+            decision.reason
+        ))
+    }
 }
 
 /// Install Nix using the official multi-user installer.
@@ -719,7 +890,7 @@ pub fn init(adapter: &impl NixAdapter) -> Result<InitReport> {
     })
 }
 
-fn get_or_create_rootfile() -> Result<Rootfile> {
+pub(crate) fn get_or_create_rootfile() -> Result<Rootfile> {
     let dir = get_root_dir()?;
     let path = dir.join("Rootfile");
     if path.exists() {
@@ -1015,10 +1186,135 @@ fn parse_attributes(search_output: &str) -> Vec<String> {
         .collect()
 }
 
+fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<SearchMatch> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut matched_fields = Vec::new();
+    if spec.name.to_lowercase().contains(&query) {
+        matched_fields.push("name".to_string());
+    }
+    if spec
+        .aliases
+        .iter()
+        .any(|alias| alias.to_lowercase().contains(&query))
+    {
+        matched_fields.push("alias".to_string());
+    }
+    if spec.category.to_lowercase().contains(&query) {
+        matched_fields.push("category".to_string());
+    }
+    if spec.description.to_lowercase().contains(&query) {
+        matched_fields.push("description".to_string());
+    }
+    if spec.nix_attr.to_lowercase().contains(&query) {
+        matched_fields.push("nix_attr".to_string());
+    }
+    if spec
+        .binaries
+        .iter()
+        .any(|binary| binary.to_lowercase().contains(&query))
+    {
+        matched_fields.push("binary".to_string());
+    }
+
+    if matched_fields.is_empty() {
+        return None;
+    }
+
+    Some(SearchMatch {
+        name: spec.name,
+        aliases: spec
+            .aliases
+            .iter()
+            .map(|alias| (*alias).to_string())
+            .collect(),
+        category: spec.category,
+        description: spec.description,
+        nix_attr: spec.nix_attr,
+        binaries: spec
+            .binaries
+            .iter()
+            .map(|binary| (*binary).to_string())
+            .collect(),
+        verify: spec
+            .verify
+            .iter()
+            .map(|verify| format!("{} {}", verify.binary, verify.args.join(" ")))
+            .collect(),
+        matched_fields,
+    })
+}
+
+fn search_rank(query: &str, package: &SearchMatch) -> u8 {
+    let query = query.trim().to_lowercase();
+    if package.name.eq_ignore_ascii_case(&query) {
+        return 0;
+    }
+    if package
+        .aliases
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(&query))
+    {
+        return 1;
+    }
+    if package
+        .binaries
+        .iter()
+        .any(|binary| binary.eq_ignore_ascii_case(&query))
+    {
+        return 2;
+    }
+    if package.name.to_lowercase().contains(&query) {
+        return 3;
+    }
+    if package
+        .aliases
+        .iter()
+        .any(|alias| alias.to_lowercase().contains(&query))
+    {
+        return 4;
+    }
+    if package
+        .binaries
+        .iter()
+        .any(|binary| binary.to_lowercase().contains(&query))
+    {
+        return 5;
+    }
+    if package.category.to_lowercase().contains(&query) {
+        return 6;
+    }
+    if package.nix_attr.to_lowercase().contains(&query) {
+        return 7;
+    }
+    8
+}
+
+pub fn search(query: &str) -> SearchOutput {
+    let mut matches: Vec<SearchMatch> = SUPPORTED_PACKAGES
+        .iter()
+        .filter_map(|spec| search_match_for_package(query, spec))
+        .collect();
+    matches.sort_by(|a, b| {
+        search_rank(query, a)
+            .cmp(&search_rank(query, b))
+            .then_with(|| a.name.cmp(b.name))
+    });
+
+    SearchOutput {
+        query: query.to_string(),
+        matches,
+        supported_count: SUPPORTED_PACKAGES.len(),
+    }
+}
+
 pub fn plan(adapter: &impl NixAdapter, pkg: &str) -> Result<PlanReport> {
     let spec = resolve_package(pkg).ok_or_else(|| {
         anyhow::anyhow!(
-            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
+            "Root does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
             pkg,
             format_supported_packages()
         )
@@ -1072,13 +1368,14 @@ pub fn plan(adapter: &impl NixAdapter, pkg: &str) -> Result<PlanReport> {
 pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
     let spec = resolve_package(pkg).ok_or_else(|| {
         anyhow::anyhow!(
-            "Root v0.1 does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
+            "Root does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
             pkg,
             format_supported_packages()
         )
     })?;
     let canonical = spec.name;
     let original = pkg;
+    enforce_policy(policy::PolicyAction::Install, Some(canonical))?;
     let _guard = MutationGuard::acquire()?;
     let lock = get_or_create_lock_v2()?;
     let before_packages: Vec<String> = lock.packages.iter().map(|p| p.name.clone()).collect();
@@ -1150,6 +1447,188 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
     })
 }
 
+fn update_requested_package(
+    requested: Option<&str>,
+    rootfile: &Rootfile,
+) -> Result<(Vec<UpdateTarget>, Vec<String>)> {
+    if let Some(pkg) = requested {
+        let spec = resolve_package(pkg).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Root does not support \"{}\" yet.\n\nSupported packages:\n{}\n\nMore packages are coming soon.",
+                pkg,
+                format_supported_packages()
+            )
+        })?;
+        if !rootfile.packages.contains_key(spec.name) && !rootfile.packages.contains_key(pkg) {
+            return Err(anyhow::anyhow!(
+                "Package '{}' is not listed in Rootfile.\n\nInstall it first with:  root install {}",
+                spec.name,
+                spec.name
+            ));
+        }
+        return Ok((vec![(pkg.to_string(), spec)], Vec::new()));
+    }
+
+    let mut keys: Vec<&str> = rootfile.packages.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut targets = Vec::new();
+    let mut skipped = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for key in keys {
+        if let Some(spec) = resolve_package(key) {
+            if seen.insert(spec.name) {
+                targets.push((key.to_string(), spec));
+            }
+        } else {
+            skipped.push(key.to_string());
+        }
+    }
+
+    Ok((targets, skipped))
+}
+
+pub fn update(adapter: &impl NixAdapter, pkg: Option<&str>) -> Result<UpdateReport> {
+    root_lockfile::init_root_dir()?;
+    let rootfile = get_or_create_rootfile()?;
+    let (targets, skipped) = update_requested_package(pkg, &rootfile)?;
+
+    if targets.is_empty() {
+        return Ok(UpdateReport {
+            success: true,
+            requested: pkg.map(str::to_string),
+            updated: Vec::new(),
+            unchanged: Vec::new(),
+            skipped,
+            failed: Vec::new(),
+            snapshot_id: None,
+            warnings: vec!["No supported packages found in Rootfile.".to_string()],
+        });
+    }
+
+    for (_, spec) in &targets {
+        enforce_policy(policy::PolicyAction::Update, Some(spec.name))?;
+    }
+    let _guard = MutationGuard::acquire()?;
+    let current_lock = get_or_create_lock_v2()?;
+
+    let snapshot = Snapshot::create_from_v2(
+        &match pkg {
+            Some(pkg) => format!("before update {}", pkg),
+            None => "before update all".to_string(),
+        },
+        &current_lock,
+    )?;
+    let snapshot_id = snapshot.id.clone();
+
+    let mut updated = Vec::new();
+    let mut unchanged = Vec::new();
+    let mut resolved_packages = Vec::new();
+    let mut flake_for_lock = None;
+
+    for (requested_key, spec) in &targets {
+        let canonical = spec.name;
+        let old_package = current_lock
+            .packages
+            .iter()
+            .find(|package| package.name == canonical);
+        let requested_name = old_package
+            .map(|package| package.requested.as_str())
+            .unwrap_or(requested_key.as_str());
+
+        let (flake, installable) = locked_installable_for(adapter, canonical)?;
+        let resolution = adapter
+            .resolve_locked_package(canonical, Some(&installable))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let locked_package = deterministic_package_from_resolution(
+            canonical,
+            requested_name,
+            &installable,
+            &resolution,
+        )?;
+
+        if old_package
+            .map(|old_package| locked_package_changed(old_package, &locked_package))
+            .unwrap_or(true)
+        {
+            adapter.remove(canonical).map_err(|e| anyhow::anyhow!(e))?;
+            adapter
+                .install_installable(canonical, &installable)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            verify_profile_contains_outputs(adapter, &locked_package.store_paths)?;
+            updated.push(canonical.to_string());
+        } else {
+            unchanged.push(canonical.to_string());
+        }
+
+        flake_for_lock = Some(flake);
+        resolved_packages.push(locked_package);
+    }
+
+    let target_names: std::collections::BTreeSet<&str> =
+        targets.iter().map(|(_, spec)| spec.name).collect();
+    let mut v2_packages: Vec<LockedPackageV2> = current_lock
+        .packages
+        .iter()
+        .filter(|package| !target_names.contains(package.name.as_str()))
+        .cloned()
+        .collect();
+    v2_packages.extend(resolved_packages.clone());
+
+    let flake = match flake_for_lock {
+        Some(flake) => flake,
+        None => adapter
+            .flake_metadata("nixpkgs")
+            .map_err(|e| anyhow::anyhow!(e))?,
+    };
+    let legacy_lock = legacy_lock_from_v2(&current_lock);
+    let new_lock = build_v2_lock(&legacy_lock, &flake, v2_packages)?;
+
+    let mut next_rootfile = rootfile;
+    for package in &resolved_packages {
+        next_rootfile.packages.remove(&package.requested);
+        next_rootfile
+            .packages
+            .insert(package.name.clone(), package.version.clone());
+    }
+    save_rootfile(&next_rootfile)?;
+    save_lock_v2(&new_lock)?;
+
+    let message = format!(
+        "Updated: {}. Unchanged: {}. Skipped: {}.",
+        updated.join(", "),
+        unchanged.join(", "),
+        skipped.join(", ")
+    );
+    let _ = events::record_event(
+        events::RootEventType::Update,
+        events::RootEventStatus::Completed,
+        &match pkg {
+            Some(pkg) => format!("root update {}", pkg),
+            None => "root update".to_string(),
+        },
+        if targets.len() == 1 {
+            Some(targets[0].1.name.to_string())
+        } else {
+            None
+        },
+        Some(snapshot_id.clone()),
+        None,
+        Some(message),
+    )?;
+
+    Ok(UpdateReport {
+        success: true,
+        requested: pkg.map(str::to_string),
+        updated,
+        unchanged,
+        skipped,
+        failed: Vec::new(),
+        snapshot_id: Some(snapshot_id),
+        warnings: Vec::new(),
+    })
+}
+
 pub fn list(adapter: &impl NixAdapter) -> Result<ListOutput> {
     root_lockfile::init_root_dir()?;
     let rootfile = get_or_create_rootfile()?;
@@ -1169,6 +1648,7 @@ pub fn list(adapter: &impl NixAdapter) -> Result<ListOutput> {
 
 pub fn remove(adapter: &impl NixAdapter, pkg: &str) -> Result<RemoveReport> {
     root_lockfile::init_root_dir()?;
+    enforce_policy(policy::PolicyAction::Remove, Some(pkg))?;
     let _guard = MutationGuard::acquire()?;
     let mut lock = get_or_create_lock_v2()?;
 
@@ -1446,6 +1926,7 @@ pub struct LockReport {
     pub success: bool,
     pub packages_locked: Vec<String>,
     pub packages_removed: Vec<String>,
+    pub snapshot_id: Option<String>,
 }
 
 pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
@@ -1453,6 +1934,18 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
     let _guard = MutationGuard::acquire()?;
     let rootfile = get_or_create_rootfile()?;
     let old_lock = get_or_create_lock()?;
+
+    // Snapshot existing lockfile state before overwriting
+    let snapshot_id = {
+        let lock_path = get_root_dir()?.join("root.lock");
+        if lock_path.exists() {
+            let old_v2_lock = get_or_create_lock_v2()?;
+            let snapshot = Snapshot::create_from_v2("before lock", &old_v2_lock)?;
+            Some(snapshot.id)
+        } else {
+            None
+        }
+    };
 
     let mut packages_locked = Vec::new();
     let mut packages_removed = Vec::new();
@@ -1492,6 +1985,7 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
         success: true,
         packages_locked,
         packages_removed,
+        snapshot_id,
     })
 }
 
@@ -1502,6 +1996,82 @@ pub struct SyncReport {
     pub removed: Vec<String>,
     pub unchanged: Vec<String>,
     pub snapshot_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxCreateReport {
+    pub success: bool,
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxRunReport {
+    pub success: bool,
+    pub sandbox_id: String,
+    pub command: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxListReport {
+    pub success: bool,
+    pub sandboxes: Vec<root_sandbox::SandboxInstance>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxDestroyReport {
+    pub success: bool,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DriftIssue {
+    pub category: String,
+    pub description: String,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusReport {
+    pub success: bool,
+    pub healthy: bool,
+    pub state: String,
+    pub rootfile_packages: usize,
+    pub lockfile_packages: usize,
+    pub profile_packages: usize,
+    pub machine_id: String,
+    pub hostname: String,
+    pub drift_details: Vec<DriftIssue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreReport {
+    pub success: bool,
+    pub lock_path: String,
+    pub installed: Vec<String>,
+    pub removed: Vec<String>,
+    pub unchanged: Vec<String>,
+    pub snapshot_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProfilePackageEntry {
+    package: String,
+    store_paths: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ProfileReconcileReport {
+    installed: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
+    snapshot_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1541,6 +2111,43 @@ pub fn catalog() -> CatalogOutput {
     }
 }
 
+fn get_or_create_machine_id() -> Result<String> {
+    let dir = root_lockfile::get_root_dir()?;
+    let path = dir.join("machine.json");
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        let json: serde_json::Value = serde_json::from_str(&content)?;
+        let id = json["machine_id"].as_str().unwrap_or("unknown").to_string();
+        let mut json = json;
+        json["last_seen"] = serde_json::Value::String(now);
+        if json.get("hostname").and_then(|v| v.as_str()) != Some(&hostname) {
+            json["hostname"] = serde_json::Value::String(hostname.clone());
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+        Ok(id)
+    } else {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let id = format!("root-{:016x}", seed as u64);
+        let json = serde_json::json!({
+            "machine_id": id,
+            "hostname": hostname,
+            "platform": root_lockfile::detect_platform().unwrap_or_else(|_| "unknown".to_string()),
+            "first_seen": now,
+            "last_seen": now,
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+        Ok(id)
+    }
+}
+
 fn format_supported_packages() -> String {
     let mut lines = Vec::new();
     let mut categories: Vec<(&str, Vec<&PackageSpec>)> = Vec::new();
@@ -1561,26 +2168,271 @@ fn format_supported_packages() -> String {
     lines.join("\n")
 }
 
+fn package_name_from_installable(installable: &str) -> String {
+    installable
+        .rsplit_once('#')
+        .map(|(_, package)| package)
+        .unwrap_or(installable)
+        .to_string()
+}
+
+fn parse_profile_package_entries_from_json(profile_json: &str) -> Vec<ProfilePackageEntry> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(profile_json) else {
+        return Vec::new();
+    };
+
+    let values: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        serde_json::Value::Object(map) => {
+            if let Some(elements) = map.get("elements").and_then(|value| value.as_array()) {
+                elements.iter().collect()
+            } else {
+                map.values().collect()
+            }
+        }
+        _ => Vec::new(),
+    };
+
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let object = value.as_object()?;
+            let installable = object
+                .get("installable")
+                .or_else(|| object.get("originalUrl"))
+                .or_else(|| object.get("original_url"))
+                .and_then(|value| value.as_str());
+            let attr_path = object
+                .get("attrPath")
+                .or_else(|| object.get("attr_path"))
+                .and_then(|value| value.as_str());
+            let package = attr_path
+                .filter(|value| !value.is_empty())
+                .map(|value| value.rsplit('.').next().unwrap_or(value).to_string())
+                .or_else(|| installable.map(package_name_from_installable))?;
+            let store_paths = object
+                .get("storePaths")
+                .or_else(|| object.get("store_paths"))
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(ToString::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(ProfilePackageEntry {
+                package,
+                store_paths,
+            })
+        })
+        .collect()
+}
+
+fn profile_packages(adapter: &impl NixAdapter) -> Result<Vec<ProfilePackageEntry>> {
+    let json_entries = adapter
+        .profile_list_json()
+        .map(|json| parse_profile_package_entries_from_json(&json))
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if !json_entries.is_empty() {
+        return Ok(json_entries);
+    }
+
+    let nix_list = adapter.list().map_err(|e| anyhow::anyhow!(e))?;
+    Ok(parse_nix_profile_packages(&nix_list)
+        .iter()
+        .map(|package| ProfilePackageEntry {
+            package: package.clone(),
+            store_paths: Vec::new(),
+        })
+        .collect())
+}
+
+fn locked_package_installed(
+    profile_entries: &[ProfilePackageEntry],
+    locked_package: &LockedPackageV2,
+) -> bool {
+    profile_entries.iter().any(|entry| {
+        if entry.package != locked_package.name {
+            return false;
+        }
+        if locked_package.store_paths.is_empty() {
+            return true;
+        }
+        locked_package
+            .store_paths
+            .values()
+            .all(|store_path| entry.store_paths.iter().any(|path| path == store_path))
+    })
+}
+
+fn write_rootfile_from_v2_lock(lock: &RootLockV2) -> Result<()> {
+    let mut rootfile = get_or_create_rootfile()?;
+    rootfile.packages.clear();
+    for package in &lock.packages {
+        rootfile
+            .packages
+            .insert(package.name.clone(), package.version.clone());
+    }
+    save_rootfile(&rootfile)
+}
+
+fn reconcile_profile_to_lock(
+    adapter: &impl NixAdapter,
+    target_lock: &RootLockV2,
+    snapshot_reason: &str,
+    command: &str,
+    event_type: events::RootEventType,
+) -> Result<ProfileReconcileReport> {
+    let current_lock = get_or_create_lock_v2()?;
+    let snapshot = Snapshot::create_from_v2(snapshot_reason, &current_lock)?;
+    let snapshot_id = snapshot.id.clone();
+
+    let profile_entries = profile_packages(adapter)?;
+    let locked_names: std::collections::BTreeSet<&str> = target_lock
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let mut installed = Vec::new();
+    let mut unchanged = Vec::new();
+
+    for package in &target_lock.packages {
+        if locked_package_installed(&profile_entries, package) {
+            unchanged.push(package.name.clone());
+            continue;
+        }
+
+        let install_result = if let Some(installable) = package.installable.as_deref() {
+            adapter.install_installable(&package.name, installable)
+        } else {
+            adapter.install(&package.name)
+        };
+        install_result.map_err(|e| {
+            let _ = events::record_event(
+                event_type.clone(),
+                events::RootEventStatus::Failed,
+                command,
+                Some(package.name.clone()),
+                Some(snapshot_id.clone()),
+                None,
+                Some(format!(
+                    "Failed to install package '{}': {}",
+                    package.name, e
+                )),
+            );
+            anyhow::anyhow!("{} failed to install '{}': {}", command, package.name, e)
+        })?;
+
+        verify_profile_contains_outputs(adapter, &package.store_paths).map_err(|e| {
+            let _ = events::record_event(
+                event_type.clone(),
+                events::RootEventStatus::Failed,
+                command,
+                Some(package.name.clone()),
+                Some(snapshot_id.clone()),
+                None,
+                Some(format!(
+                    "Profile verification failed for '{}': {}",
+                    package.name, e
+                )),
+            );
+            anyhow::anyhow!(
+                "{} verification failed for '{}': {}",
+                command,
+                package.name,
+                e
+            )
+        })?;
+        installed.push(package.name.clone());
+    }
+
+    let mut removed = Vec::new();
+    for entry in &profile_entries {
+        if !locked_names.contains(entry.package.as_str()) {
+            adapter.remove(&entry.package).map_err(|e| {
+                let _ = events::record_event(
+                    event_type.clone(),
+                    events::RootEventStatus::Failed,
+                    command,
+                    Some(entry.package.clone()),
+                    Some(snapshot_id.clone()),
+                    None,
+                    Some(format!(
+                        "Failed to remove package '{}': {}",
+                        entry.package, e
+                    )),
+                );
+                anyhow::anyhow!("{} failed to remove '{}': {}", command, entry.package, e)
+            })?;
+            removed.push(entry.package.clone());
+        }
+    }
+
+    save_lock_v2(target_lock)?;
+    write_rootfile_from_v2_lock(target_lock)?;
+
+    let _ = events::record_event(
+        event_type,
+        events::RootEventStatus::Completed,
+        command,
+        None,
+        Some(snapshot_id.clone()),
+        None,
+        Some(format!(
+            "Installed: {}. Removed: {}. Unchanged: {}.",
+            installed.join(", "),
+            removed.join(", "),
+            unchanged.join(", ")
+        )),
+    )?;
+
+    Ok(ProfileReconcileReport {
+        installed,
+        removed,
+        unchanged,
+        snapshot_id,
+    })
+}
+
 pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
     root_lockfile::init_root_dir()?;
+    enforce_policy(policy::PolicyAction::Sync, None)?;
+    let policy_lock = get_or_create_lock_v2()?;
+    for package in &policy_lock.packages {
+        enforce_policy(policy::PolicyAction::Sync, Some(&package.name))?;
+    }
     let _guard = MutationGuard::acquire()?;
 
-    // sync is experimental and does not support v2 deterministic locks.
-    // Detect v2 lock and refuse rather than operating on a lossy v1 projection.
     let root_dir = get_root_dir()?;
     let lock_path = root_dir.join("root.lock");
     if lock_path.exists() {
         if let Ok(v2_lock) = RootLockV2::read_from_file(&lock_path) {
-            if v2_lock.version >= ROOT_LOCK_SCHEMA_VERSION {
-                return Err(anyhow::anyhow!(
-                    "`root sync` does not support v2 lockfiles. \
-                     v0.1.2 manages profile state automatically during `root install` and `root rollback`. \
-                     Use `root install` or `root rollback` instead."
-                ));
+            if v2_lock.version < ROOT_LOCK_SCHEMA_VERSION {
+                return sync_legacy_lock(adapter);
             }
         }
     }
 
+    let lock = get_or_create_lock_v2()?;
+    let report = reconcile_profile_to_lock(
+        adapter,
+        &lock,
+        "before sync",
+        "root sync",
+        events::RootEventType::Update,
+    )?;
+
+    Ok(SyncReport {
+        success: true,
+        installed: report.installed,
+        removed: report.removed,
+        unchanged: report.unchanged,
+        snapshot_id: report.snapshot_id,
+    })
+}
+
+fn sync_legacy_lock(adapter: &impl NixAdapter) -> Result<SyncReport> {
     let lock = get_or_create_lock()?;
     let nix_list = adapter.list().map_err(|e| anyhow::anyhow!(e))?;
     let profile_pkgs = parse_nix_profile_packages(&nix_list);
@@ -1603,7 +2455,6 @@ pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
         .cloned()
         .collect();
 
-    // Snapshot before sync
     let snapshot = Snapshot::create("before sync", &lock)?;
     let snapshot_id = snapshot.id.clone();
 
@@ -1614,7 +2465,6 @@ pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
         adapter.remove(pkg).map_err(|e| anyhow::anyhow!(e))?;
     }
 
-    // Update Rootfile to match lock
     let mut rootfile = get_or_create_rootfile()?;
     rootfile.packages.clear();
     for pkg in &lock.packages {
@@ -1624,12 +2474,280 @@ pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
     }
     save_rootfile(&rootfile)?;
 
+    let _ = events::record_event(
+        events::RootEventType::Update,
+        events::RootEventStatus::Completed,
+        "root sync",
+        None,
+        Some(snapshot_id.clone()),
+        None,
+        Some(format!(
+            "Installed: {}. Removed: {}. Unchanged: {}.",
+            to_install.join(", "),
+            to_remove.join(", "),
+            unchanged.join(", ")
+        )),
+    )?;
+
     Ok(SyncReport {
         success: true,
         installed: to_install,
         removed: to_remove,
         unchanged,
         snapshot_id,
+    })
+}
+
+pub fn restore(adapter: &impl NixAdapter, lock_path: Option<&Path>) -> Result<RestoreReport> {
+    root_lockfile::init_root_dir()?;
+    let selected_lock_path = match lock_path {
+        Some(path) => path.to_path_buf(),
+        None => get_root_dir()?.join("root.lock"),
+    };
+    let target_lock = RootLockV2::read_from_file(&selected_lock_path)
+        .or_else(|_| RootLock::read_from_file(&selected_lock_path).map(|lock| lock.to_v2()))?;
+    enforce_policy(policy::PolicyAction::Restore, None)?;
+    for package in &target_lock.packages {
+        enforce_policy(policy::PolicyAction::Restore, Some(&package.name))?;
+    }
+    let _guard = MutationGuard::acquire()?;
+    let report = reconcile_profile_to_lock(
+        adapter,
+        &target_lock,
+        &format!(
+            "before restore from {}",
+            selected_lock_path.to_string_lossy()
+        ),
+        "root restore",
+        events::RootEventType::Restore,
+    )?;
+
+    Ok(RestoreReport {
+        success: true,
+        lock_path: selected_lock_path.to_string_lossy().to_string(),
+        installed: report.installed,
+        removed: report.removed,
+        unchanged: report.unchanged,
+        snapshot_id: report.snapshot_id,
+    })
+}
+
+pub fn sandbox_create(
+    provider: &impl SandboxProvider,
+    name: Option<&str>,
+    image: Option<&str>,
+) -> Result<SandboxCreateReport> {
+    root_lockfile::init_root_dir()?;
+    let sandbox_name = name.unwrap_or("default");
+    enforce_policy(policy::PolicyAction::SandboxCreate, Some(sandbox_name))?;
+
+    let available = provider.check_availability()?;
+    if !available {
+        return Err(anyhow::anyhow!(
+            "No sandbox provider is available.\n\n\
+             Root requires Docker to create sandboxes.\n\
+             Install Docker Desktop from https://docker.com\n\
+             Then verify with: docker info"
+        ));
+    }
+
+    let instance = provider
+        .create(sandbox_name, image)
+        .map_err(|e| anyhow::anyhow!("Sandbox create failed: {}", e))?;
+
+    let _ = events::record_event(
+        events::RootEventType::Sandbox,
+        events::RootEventStatus::Completed,
+        &format!("root sandbox create {}", sandbox_name),
+        None,
+        None,
+        None,
+        Some(format!(
+            "Created sandbox '{}' (id: {})",
+            instance.name, instance.id
+        )),
+    );
+
+    Ok(SandboxCreateReport {
+        success: true,
+        id: instance.id,
+        name: instance.name,
+        image: instance.image,
+        status: instance.status,
+        created_at: instance.created_at,
+    })
+}
+
+pub fn sandbox_run(
+    provider: &impl SandboxProvider,
+    id: &str,
+    command: &[String],
+) -> Result<SandboxRunReport> {
+    root_lockfile::init_root_dir()?;
+    enforce_policy(policy::PolicyAction::SandboxRun, Some(id))?;
+
+    let cmd_str: Vec<&str> = command.iter().map(String::as_str).collect();
+    let result = provider
+        .run_command(id, &cmd_str)
+        .map_err(|e| anyhow::anyhow!("Sandbox exec failed: {}", e))?;
+
+    let status = if result.exit_code == 0 {
+        events::RootEventStatus::Completed
+    } else {
+        events::RootEventStatus::Failed
+    };
+
+    let _ = events::record_event(
+        events::RootEventType::Sandbox,
+        status,
+        &format!("root sandbox run {}", id),
+        None,
+        None,
+        None,
+        Some(format!(
+            "Executed in sandbox '{}': exit code {}",
+            id, result.exit_code
+        )),
+    );
+
+    Ok(SandboxRunReport {
+        success: result.exit_code == 0,
+        sandbox_id: id.to_string(),
+        command: command.join(" "),
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    })
+}
+
+pub fn sandbox_list(provider: &impl SandboxProvider) -> Result<SandboxListReport> {
+    root_lockfile::init_root_dir()?;
+    let sandboxes = provider
+        .list()
+        .map_err(|e| anyhow::anyhow!("Sandbox list failed: {}", e))?;
+    Ok(SandboxListReport {
+        success: true,
+        sandboxes,
+    })
+}
+
+pub fn sandbox_destroy(provider: &impl SandboxProvider, id: &str) -> Result<SandboxDestroyReport> {
+    root_lockfile::init_root_dir()?;
+    enforce_policy(policy::PolicyAction::SandboxDestroy, Some(id))?;
+
+    provider
+        .destroy(id)
+        .map_err(|e| anyhow::anyhow!("Sandbox destroy failed: {}", e))?;
+
+    let _ = events::record_event(
+        events::RootEventType::Sandbox,
+        events::RootEventStatus::Completed,
+        &format!("root sandbox destroy {}", id),
+        None,
+        None,
+        None,
+        Some(format!("Destroyed sandbox '{}'", id)),
+    );
+
+    Ok(SandboxDestroyReport {
+        success: true,
+        id: id.to_string(),
+    })
+}
+
+pub fn status(adapter: &impl root_nix::NixAdapter) -> Result<StatusReport> {
+    root_lockfile::init_root_dir()?;
+    let machine_id = get_or_create_machine_id()?;
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let rootfile = get_or_create_rootfile()?;
+    let lock = get_or_create_lock_v2()?;
+    let (profile_entries, profile_error) = match profile_packages(adapter) {
+        Ok(entries) => (entries, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+
+    let rootfile_count = rootfile.packages.len();
+    let lockfile_count = lock.packages.len();
+    let profile_count = profile_entries.len();
+
+    let mut drift_details = Vec::new();
+    let mut healthy = true;
+
+    if let Some(error) = profile_error {
+        drift_details.push(DriftIssue {
+            category: "profile-unavailable".to_string(),
+            description: format!("Could not inspect the Root-managed Nix profile: {}", error),
+            suggestion: "Run `root doctor` to diagnose Nix and profile availability".to_string(),
+        });
+        healthy = false;
+    }
+
+    // Compare Rootfile vs lockfile
+    for pkg_name in rootfile.packages.keys() {
+        if !lock.packages.iter().any(|p| p.name == *pkg_name) {
+            drift_details.push(DriftIssue {
+                category: "rootfile-lockfile-mismatch".to_string(),
+                description: format!("Package '{}' is in Rootfile but not in root.lock", pkg_name),
+                suggestion: "Run `root lock` to regenerate root.lock from Rootfile intent"
+                    .to_string(),
+            });
+            healthy = false;
+        }
+    }
+
+    // Compare lockfile vs profile
+    for pkg in &lock.packages {
+        if !profile_entries.iter().any(|e| e.package == pkg.name) {
+            drift_details.push(DriftIssue {
+                category: "lockfile-profile-mismatch".to_string(),
+                description: format!(
+                    "Package '{}' is in root.lock but not in Nix profile",
+                    pkg.name
+                ),
+                suggestion: "Run `root sync` to install the locked package".to_string(),
+            });
+            healthy = false;
+        }
+    }
+
+    for entry in &profile_entries {
+        if !lock.packages.iter().any(|p| p.name == entry.package) {
+            drift_details.push(DriftIssue {
+                category: "profile-lockfile-mismatch".to_string(),
+                description: format!(
+                    "Package '{}' is in Nix profile but not in root.lock",
+                    entry.package
+                ),
+                suggestion: "Run `root sync` to remove the extra package".to_string(),
+            });
+            healthy = false;
+        }
+    }
+
+    let state = if healthy {
+        "Healthy".to_string()
+    } else if drift_details
+        .iter()
+        .any(|d| d.category == "lockfile-profile-mismatch" || d.category == "profile-unavailable")
+    {
+        "NeedsAttention".to_string()
+    } else {
+        "Drifted".to_string()
+    };
+
+    Ok(StatusReport {
+        success: true,
+        healthy,
+        state,
+        rootfile_packages: rootfile_count,
+        lockfile_packages: lockfile_count,
+        profile_packages: profile_count,
+        machine_id,
+        hostname,
+        drift_details,
     })
 }
 
@@ -1879,6 +2997,46 @@ mod tests {
     }
 
     #[test]
+    fn test_lock_creates_snapshot_before_writing() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("lock_snapshot");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        // First lock on fresh root — no existing lockfile, so no snapshot
+        let mut rf = get_or_create_rootfile().unwrap();
+        rf.packages.insert("ripgrep".into(), "latest".into());
+        save_rootfile(&rf).unwrap();
+
+        let report = lock(&adapter).unwrap();
+        assert!(report.success);
+        assert!(report.snapshot_id.is_none());
+
+        let before_snaps = list_snapshots().unwrap();
+        let before_count = before_snaps.len();
+
+        // Second lock — existing lockfile should be snapshotted before overwrite
+        let report2 = lock(&adapter).unwrap();
+        assert!(report2.success);
+        assert!(
+            report2.snapshot_id.is_some(),
+            "expected a snapshot when an existing lockfile is present"
+        );
+
+        let after_snaps = list_snapshots().unwrap();
+        assert_eq!(
+            after_snaps.len(),
+            before_count + 1,
+            "expected exactly one new snapshot"
+        );
+        assert!(after_snaps.iter().any(|s| s.reason == "before lock"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_sync_reconciles_profile() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let tmp = test_tmp_dir("sync");
@@ -1929,16 +3087,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_refuses_v2_lock() {
+    fn test_sync_reconciles_v2_lock() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        let tmp = test_tmp_dir("sync_refuse_v2");
+        let tmp = test_tmp_dir("sync_v2");
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("ROOT_DIR", &tmp);
         let root_dir = root_lockfile::init_root_dir().unwrap();
         let adapter = MockNixAdapter::new(true);
 
-        // Create a v2 lock with deterministic metadata
-        adapter.install("ripgrep").unwrap();
+        adapter.install("fd").unwrap();
         let (flake, installable) = locked_installable_for(&adapter, "ripgrep").unwrap();
         let resolution = adapter
             .resolve_locked_package("ripgrep", Some(&installable))
@@ -1963,8 +3120,84 @@ mod tests {
         .unwrap();
         v2_lock.write_to_file(&root_dir.join("root.lock")).unwrap();
 
-        let err = sync(&adapter).unwrap_err();
-        assert!(err.to_string().contains("does not support v2 lockfiles"));
+        let report = sync(&adapter).unwrap();
+        assert!(report.success);
+        assert!(report.installed.contains(&"ripgrep".to_string()));
+        assert!(report.removed.contains(&"fd".to_string()));
+        assert!(report.unchanged.is_empty());
+
+        let rf = get_or_create_rootfile().unwrap();
+        assert!(rf.packages.contains_key("ripgrep"));
+        assert!(!rf.packages.contains_key("fd"));
+
+        let hist = history().unwrap();
+        assert!(hist.events.iter().any(|event| {
+            event.event_type == events::RootEventType::Update
+                && event.command == "root sync"
+                && event.snapshot_id.as_deref() == Some(report.snapshot_id.as_str())
+        }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_restore_from_shared_v2_lock() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("restore_v2");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        adapter.install("fd").unwrap();
+        let (flake, installable) = locked_installable_for(&adapter, "ripgrep").unwrap();
+        let resolution = adapter
+            .resolve_locked_package("ripgrep", Some(&installable))
+            .unwrap();
+        let locked_pkg =
+            deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution)
+                .unwrap();
+        let shared_lock = build_v2_lock(
+            &RootLock {
+                version: 1,
+                platform: root_lockfile::detect_platform()
+                    .unwrap_or_else(|_| "aarch64-darwin".into()),
+                nixpkgs: NixpkgsConfig {
+                    rev: "some-rev".into(),
+                    source: "github:NixOS/nixpkgs".into(),
+                },
+                packages: vec![],
+            },
+            &flake,
+            vec![locked_pkg],
+        )
+        .unwrap();
+        let shared_lock_path = root_dir.join("shared-root.lock");
+        shared_lock.write_to_file(&shared_lock_path).unwrap();
+
+        let report = restore(&adapter, Some(&shared_lock_path)).unwrap();
+        assert!(report.success);
+        assert_eq!(
+            report.lock_path,
+            shared_lock_path.to_string_lossy().to_string()
+        );
+        assert!(report.installed.contains(&"ripgrep".to_string()));
+        assert!(report.removed.contains(&"fd".to_string()));
+
+        let active_lock = RootLockV2::read_from_file(&root_dir.join("root.lock")).unwrap();
+        assert!(active_lock.packages.iter().any(|p| p.name == "ripgrep"));
+        assert!(!active_lock.packages.iter().any(|p| p.name == "fd"));
+
+        let rf = get_or_create_rootfile().unwrap();
+        assert!(rf.packages.contains_key("ripgrep"));
+        assert!(!rf.packages.contains_key("fd"));
+
+        let hist = history().unwrap();
+        assert!(hist.events.iter().any(|event| {
+            event.event_type == events::RootEventType::Restore
+                && event.command == "root restore"
+                && event.snapshot_id.as_deref() == Some(report.snapshot_id.as_str())
+        }));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -2248,6 +3481,61 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_alias_resolves_canonical_package() {
+        let output = search("rg");
+        assert_eq!(output.query, "rg");
+        let ripgrep = output
+            .matches
+            .iter()
+            .find(|package| package.name == "ripgrep")
+            .unwrap();
+        assert!(ripgrep.aliases.contains(&"rg".to_string()));
+        assert!(ripgrep.matched_fields.contains(&"alias".to_string()));
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["matches"][0]["name"], "ripgrep");
+    }
+
+    #[test]
+    fn test_search_matches_category_description_binary_and_nix_attr() {
+        let category = search("search");
+        assert!(category
+            .matches
+            .iter()
+            .any(|package| package.name == "ripgrep"));
+
+        let description = search("recursive");
+        assert!(description
+            .matches
+            .iter()
+            .any(|package| package.name == "ripgrep"));
+
+        let binary = search("pdfinfo");
+        assert!(binary
+            .matches
+            .iter()
+            .any(|package| package.name == "poppler"));
+
+        let nix_attr = search("nixpkgs#kubectl");
+        assert!(nix_attr
+            .matches
+            .iter()
+            .any(|package| package.name == "kubectl"));
+    }
+
+    #[test]
+    fn test_search_is_case_insensitive_and_reports_no_matches() {
+        let output = search("TERRAFORM");
+        assert!(output
+            .matches
+            .iter()
+            .any(|package| package.name == "terraform"));
+
+        let no_match = search("definitely-not-a-root-package");
+        assert!(no_match.matches.is_empty());
+        assert_eq!(no_match.supported_count, SUPPORTED_PACKAGES.len());
+    }
+
+    #[test]
     fn test_plan_with_alias_resolves_to_canonical() {
         use root_nix::MockNixAdapter;
         let adapter = MockNixAdapter::new(true);
@@ -2281,6 +3569,102 @@ mod tests {
         assert_eq!(rg_pkg.name, "ripgrep");
         assert_eq!(rg_pkg.requested, "rg");
         assert_eq!(rg_pkg.attribute, "ripgrep");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_update_with_alias_targets_canonical_package() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("update_alias");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        adapter.install("ripgrep").unwrap();
+        let mut lock = get_or_create_lock().unwrap();
+        lock.packages.push(LockedPackage {
+            name: "ripgrep".into(),
+            requested: "ripgrep".into(),
+            version: "latest".into(),
+            attribute: "ripgrep".into(),
+            store_path: root_lockfile::derive_store_path("ripgrep", "latest"),
+            binaries: vec!["rg".into()],
+        });
+        save_lock(&lock).unwrap();
+        let mut rootfile = get_or_create_rootfile().unwrap();
+        rootfile.packages.insert("ripgrep".into(), "latest".into());
+        save_rootfile(&rootfile).unwrap();
+
+        let report = update(&adapter, Some("rg")).unwrap();
+        assert!(report.success);
+        assert!(report.updated.contains(&"ripgrep".to_string()));
+        assert!(report.snapshot_id.is_some());
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        let rg_pkg = lock.packages.iter().find(|p| p.name == "ripgrep").unwrap();
+        assert_eq!(rg_pkg.name, "ripgrep");
+        assert_eq!(rg_pkg.requested, "ripgrep");
+        assert_ne!(rg_pkg.version, "latest");
+        assert!(rg_pkg.store_path.starts_with("/nix/store/"));
+
+        let hist = history().unwrap();
+        assert!(hist.events.iter().any(|event| {
+            event.event_type == events::RootEventType::Update
+                && event.package.as_deref() == Some("ripgrep")
+        }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_update_all_packages_from_rootfile() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("update_all");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        let mut rootfile = get_or_create_rootfile().unwrap();
+        rootfile.packages.insert("ripgrep".into(), "latest".into());
+        rootfile.packages.insert("fd".into(), "latest".into());
+        rootfile
+            .packages
+            .insert("unsupported-local".into(), "latest".into());
+        save_rootfile(&rootfile).unwrap();
+
+        let report = update(&adapter, None).unwrap();
+        assert!(report.success);
+        assert!(report.updated.contains(&"ripgrep".to_string()));
+        assert!(report.updated.contains(&"fd".to_string()));
+        assert!(report.skipped.contains(&"unsupported-local".to_string()));
+
+        let lock_path = root_lockfile::get_root_dir().unwrap().join("root.lock");
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        assert!(lock.packages.iter().any(|p| p.name == "ripgrep"));
+        assert!(lock.packages.iter().any(|p| p.name == "fd"));
+        assert!(!lock.packages.iter().any(|p| p.name == "unsupported-local"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_update_rejects_unsupported_or_unmanaged_package() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("update_rejects");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        let unsupported = update(&adapter, Some("nonexistent_pkg_xyz")).unwrap_err();
+        assert!(unsupported.to_string().contains("does not support"));
+
+        let unmanaged = update(&adapter, Some("ripgrep")).unwrap_err();
+        assert!(unmanaged.to_string().contains("not listed in Rootfile"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -2882,5 +4266,237 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_run_rootfile_task_with_root_profile_path() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("run_task");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        write_fake_binary(
+            &tmp,
+            "root-test-tool",
+            "#!/bin/sh\nprintf 'from-root-profile\\n'\n",
+        );
+
+        let mut rootfile = Rootfile::default();
+        rootfile
+            .tasks
+            .insert("profile-check".to_string(), "root-test-tool".to_string());
+        rootfile.write_to_file(&tmp.join("Rootfile")).unwrap();
+
+        let report = run(RunRequest::Task("profile-check".to_string())).unwrap();
+        assert!(report.success);
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(report.stdout, "from-root-profile\n");
+        assert_eq!(report.task.as_deref(), Some("profile-check"));
+
+        let events = events::read_events().unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == events::RootEventType::Execution
+                && event.task_name.as_deref() == Some("profile-check")
+                && event.exit_code == Some(0)
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_run_workflow_file() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("run_workflow");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let workflow_path = tmp.join("ci.root.toml");
+        std::fs::write(
+            &workflow_path,
+            "version = 1\nname = \"ci\"\ncommand = \"printf workflow-ok\"\n",
+        )
+        .unwrap();
+
+        let report = run(RunRequest::Workflow(workflow_path)).unwrap();
+        assert!(report.success);
+        assert_eq!(report.source, "workflow");
+        assert_eq!(report.task.as_deref(), Some("ci"));
+        assert_eq!(report.stdout, "workflow-ok");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_policy_apply_and_permissions_report() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("policy_apply");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let source = tmp.join("source-policy.toml");
+        std::fs::write(&source, "version = 1\n[execution]\nrun = \"deny\"\n").unwrap();
+
+        let applied = apply_policy(&source).unwrap();
+        assert_eq!(applied.version, 1);
+        let report = permissions().unwrap();
+        assert_eq!(report.source, "configured");
+        assert_eq!(report.policy.execution.run, policy::PolicyMode::Deny);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_denied_install_creates_no_snapshot() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("policy_denied_install");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        std::fs::write(
+            tmp.join("policy.toml"),
+            "version = 1\n[packages]\ninstall = \"deny\"\n",
+        )
+        .unwrap();
+
+        let adapter = MockNixAdapter::new(true);
+        let error = install(&adapter, "ripgrep").unwrap_err();
+        assert!(error.to_string().contains("Policy denied install"));
+        assert!(list_snapshots().unwrap().is_empty());
+
+        let events = events::read_events().unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == events::RootEventType::Policy
+                && event.policy_decision.as_deref() == Some("denied")
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_sandbox_policy_denies_before_provider_mutation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("sandbox_policy");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        std::fs::write(
+            tmp.join("policy.toml"),
+            "version = 1\n[sandboxes]\ncreate = \"deny\"\n",
+        )
+        .unwrap();
+
+        let provider = root_sandbox::MockSandboxProvider::new(true);
+        let error = sandbox_create(&provider, Some("blocked"), None).unwrap_err();
+        assert!(error.to_string().contains("Policy denied sandbox-create"));
+        assert!(provider.list().unwrap().is_empty());
+
+        let events = events::read_events().unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == events::RootEventType::Policy
+                && event.policy_decision.as_deref() == Some("denied")
+                && event.command == "policy check sandbox-create"
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_status_reports_healthy_and_profile_drift() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("status_drift");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ripgrep").unwrap();
+        let healthy = status(&adapter).unwrap();
+        assert!(healthy.healthy);
+        assert_eq!(healthy.state, "Healthy");
+        assert!(healthy.drift_details.is_empty());
+        assert_ne!(healthy.machine_id, "unknown");
+
+        adapter.remove("ripgrep").unwrap();
+        let drifted = status(&adapter).unwrap();
+        assert!(!drifted.healthy);
+        assert_eq!(drifted.state, "NeedsAttention");
+        assert_eq!(drifted.machine_id, healthy.machine_id);
+        assert!(drifted.drift_details.iter().any(|issue| {
+            issue.category == "lockfile-profile-mismatch" && issue.suggestion.contains("root sync")
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_status_reports_unavailable_profile_as_needs_attention() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("status_unavailable");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(false);
+
+        let report = status(&adapter).unwrap();
+        assert!(!report.healthy);
+        assert_eq!(report.state, "NeedsAttention");
+        assert!(report.drift_details.iter().any(|issue| {
+            issue.category == "profile-unavailable" && issue.suggestion.contains("root doctor")
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_mutation_guard_acquires_and_releases() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("mutation_guard");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+
+        let guard = MutationGuard::acquire().unwrap();
+        // Second acquire should fail (already held)
+        assert!(MutationGuard::acquire().is_err());
+        drop(guard);
+        // After release, should be able to acquire again
+        let guard2 = MutationGuard::acquire().unwrap();
+        drop(guard2);
+    }
+
+    #[test]
+    fn test_mutation_guard_stale_lock_recovery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("mutation_stale");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+
+        // Write a stale lock file with a non-existent PID (PID 999999999 likely dead)
+        let lock_path = tmp.join("root.lockfile");
+        std::fs::write(&lock_path, "999999999\n0\n").unwrap();
+        // Acquire should detect stale lock, remove it, and succeed
+        let guard = MutationGuard::acquire().unwrap();
+        assert!(lock_path.exists());
+        // The lock content should contain our actual PID
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        let pid_line = content.lines().next().unwrap().trim();
+        assert_eq!(pid_line.parse::<u32>().unwrap(), std::process::id());
+        drop(guard);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn test_mutation_guard_malformed_lock_fails_safely() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("mutation_malformed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+
+        // Write a malformed lock file
+        let lock_path = tmp.join("root.lockfile");
+        std::fs::write(&lock_path, "not-a-pid\n").unwrap();
+        // Acquire should return an error about the malformed lock
+        let err = MutationGuard::acquire().unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("lock") || err_msg.contains("stale") || err_msg.contains("manual"),
+            "Expected error about lock file, got: {}",
+            err_msg
+        );
     }
 }

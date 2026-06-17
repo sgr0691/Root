@@ -6,3 +6,15 @@ target
 
 # Internal design docs — not part of the public repo
 Docs/v0.1/
+Docs/Core/
+
+# Release build artifacts
+dist/
+
+# Remotion launch video
+remotion/node_modules/
+remotion/out/
+remotion/*.mp4
+remotion/*.webm
+remotion/assets/recordings/*.mp4
+remotion/assets/audio/*.mp3

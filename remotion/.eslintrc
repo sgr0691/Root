@@ -1,0 +1,5 @@
+{
+  "root": true,
+  "plugins": ["@remotion"],
+  "extends": ["plugin:@remotion/recommended"]
+}

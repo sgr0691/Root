@@ -15,7 +15,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 CI order: `fmt` → `clippy` → `test` (`.github/workflows/ci.yml`).
 
-Release: tag `v*` triggers cross-compile for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`.
+Release: tag `v*` triggers cross-compile for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`.
 
 ## Release Process
 
@@ -36,7 +36,7 @@ Release: tag `v*` triggers cross-compile for `aarch64-apple-darwin`, `x86_64-app
    - Update the title `# Root vX.Y.Z` (if minor or major release)
    - Update `## Limitations (vX.Y.Z)` section header
    - Update experimental-commands prefix to match new version
-6. Update `Docs/Release/V0_1_3_SMOKE_TEST.md` title if the smoke test doc still references the old version.
+6. Verify that `Docs/Release/` smoke test docs for the *previous* version are still accurate or have been reviewed for the new version.
 7. Commit the version bump.
 8. Tag and push:
    ```bash
@@ -56,7 +56,7 @@ Before tagging, verify all of these match the **new** version (X.Y.Z):
 | `README.md` | Title `# Root vX.Y.Z` | correct |
 | `README.md` | `## Limitations (vX.Y.Z)` | correct |
 | `README.md` | `not part of the vX.Y.Z public surface` | correct |
-| `Docs/Release/V0_1_3_SMOKE_TEST.md` | Title version reference | up to date |
+| `Docs/Release/` smoke test docs | Title version references | up to date (check previous version smoke tests) |
 | Git tag | `git tag` output | `vX.Y.Z` exists after push |
 
 > **Policy note:** Old release notes in README (e.g., "What v0.1.8 Changed") are historical documentation and must not be rewritten. Git tags must never be deleted or recreated. If a tag was missed, accept the gap — do not retroactively create it.

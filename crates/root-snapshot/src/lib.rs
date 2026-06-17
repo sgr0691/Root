@@ -104,7 +104,22 @@ impl Snapshot {
             .join("snapshots")
             .join(format!("{}.json", id));
         let content = fs::read_to_string(path).context("Snapshot not found")?;
-        let snapshot = serde_json::from_str(&content)?;
+        let snapshot: Snapshot = serde_json::from_str(&content)?;
+        // Validate lock content hash if one was stored
+        if !snapshot.lock_content_hash.is_empty() {
+            let lock_content = serde_json::to_vec(&snapshot.lock)
+                .context("Failed to serialize snapshot lock for hash verification")?;
+            let computed = compute_sha256(&lock_content);
+            if computed != snapshot.lock_content_hash {
+                anyhow::bail!(
+                    "Snapshot '{}' lock content hash mismatch: expected {}, got {}. \
+                     The snapshot may be corrupted or tampered with.",
+                    id,
+                    snapshot.lock_content_hash,
+                    computed
+                );
+            }
+        }
         Ok(snapshot)
     }
 
@@ -138,8 +153,30 @@ pub fn list_snapshots() -> Result<Vec<Snapshot>> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
             let content = fs::read_to_string(&path)?;
-            if let Ok(snap) = serde_json::from_str::<Snapshot>(&content) {
-                snapshots.push(snap);
+            match serde_json::from_str::<Snapshot>(&content) {
+                Ok(snap) => {
+                    // Validate lock content hash; skip corrupt snapshots with a warning
+                    if !snap.lock_content_hash.is_empty() {
+                        if let Ok(lock_bytes) = serde_json::to_vec(&snap.lock) {
+                            let computed = compute_sha256(&lock_bytes);
+                            if computed != snap.lock_content_hash {
+                                eprintln!(
+                                    "Warning: Snapshot '{}' is corrupted (hash mismatch), skipping",
+                                    snap.id
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    snapshots.push(snap);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Skipping corrupt snapshot file '{}': {}",
+                        path.display(),
+                        e
+                    );
+                }
             }
         }
     }
@@ -193,5 +230,73 @@ mod tests {
 
         let read_snap = Snapshot::read(&snap.id).unwrap();
         assert_eq!(read_snap.reason, "test snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_hash_validation_passes() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp =
+            std::env::temp_dir().join(format!("root_test_snap_hash_{}_{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let lock = RootLock {
+            version: 1,
+            platform: "test".into(),
+            nixpkgs: root_lockfile::NixpkgsConfig {
+                rev: "abc".into(),
+                source: "test".into(),
+            },
+            packages: vec![],
+        };
+        let snap = Snapshot::create("test hash", &lock).unwrap();
+        // Reading back should pass hash validation
+        let read_snap = Snapshot::read(&snap.id).unwrap();
+        assert_eq!(read_snap.reason, "test hash");
+    }
+
+    #[test]
+    fn test_snapshot_hash_validation_fails_on_corrupted_content() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!(
+            "root_test_snap_corrupt_{}_{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let lock = RootLock {
+            version: 1,
+            platform: "test".into(),
+            nixpkgs: root_lockfile::NixpkgsConfig {
+                rev: "abc".into(),
+                source: "test".into(),
+            },
+            packages: vec![],
+        };
+        let snap = Snapshot::create("test corrupt", &lock).unwrap();
+
+        // Corrupt the snapshot file on disk
+        let snap_path = tmp.join("snapshots").join(format!("{}.json", snap.id));
+        let mut content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&snap_path).unwrap()).unwrap();
+        content["lock"]["platform"] = serde_json::json!("corrupted");
+        std::fs::write(&snap_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+
+        // Reading the corrupted snapshot should fail hash validation
+        let err = Snapshot::read(&snap.id).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("hash mismatch"),
+            "Expected hash mismatch error, got: {}",
+            err_msg
+        );
     }
 }

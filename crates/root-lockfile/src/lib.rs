@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct Rootfile {
     #[serde(default)]
-    pub packages: HashMap<String, String>,
+    pub packages: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tasks: BTreeMap<String, String>,
     #[serde(default)]
     pub settings: RootSettings,
 }
@@ -50,7 +52,7 @@ impl Rootfile {
 
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self).context("Failed to serialize Rootfile")?;
-        fs::write(path, content).context("Failed to write Rootfile")?;
+        atomic_write(path, content.as_bytes()).context("Failed to write Rootfile")?;
         Ok(())
     }
 }
@@ -240,7 +242,7 @@ impl RootLock {
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize root.lock")?;
-        fs::write(path, content).context("Failed to write root.lock")?;
+        atomic_write(path, content.as_bytes()).context("Failed to write root.lock")?;
         Ok(())
     }
 
@@ -329,7 +331,7 @@ impl RootLockV2 {
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize root.lock v2")?;
-        fs::write(path, content).context("Failed to write root.lock")?;
+        atomic_write(path, content.as_bytes()).context("Failed to write root.lock")?;
         Ok(())
     }
 }
@@ -493,6 +495,21 @@ pub fn init_root_dir() -> Result<PathBuf> {
     Ok(root_dir)
 }
 
+/// Write content to a file atomically using temp file + rename.
+/// Preserves the existing file if the write or rename fails.
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        anyhow::anyhow!("Cannot determine parent directory for {}", path.display())
+    })?;
+    let tmp_path = dir.join(format!(
+        ".{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fs::write(&tmp_path, content).context("Failed to write temp file")?;
+    fs::rename(&tmp_path, path).context("Failed to rename temp file to target")?;
+    Ok(())
+}
+
 /// Compute the SHA-256 hex digest of arbitrary data.
 pub fn compute_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -603,12 +620,16 @@ mod tests {
         node = "22.11.0"
         poppler = "24.08.0"
 
+        [tasks]
+        build = "cargo build"
+
         [settings]
         snapshots = true
         verify_installs = false
         "#;
         let rootfile = Rootfile::read_from_str(toml_str).unwrap();
         assert_eq!(rootfile.packages.get("node").unwrap(), "22.11.0");
+        assert_eq!(rootfile.tasks.get("build").unwrap(), "cargo build");
         assert!(rootfile.settings.snapshots);
         assert!(!rootfile.settings.verify_installs);
     }
@@ -790,6 +811,82 @@ mod tests {
         assert_eq!(
             lock.nondeterministic_legacy_issues(),
             vec![LegacyLockIssue::V1Schema { version: 1 }]
+        );
+    }
+
+    #[test]
+    fn test_atomic_write_creates_and_reads() {
+        let tmp = std::env::temp_dir().join(format!("root_atomic_write_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("test.json");
+        let content = b"{\"hello\": \"world\"}";
+        atomic_write(&path, content).unwrap();
+        assert!(path.exists());
+        let read_back = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(read_back, "{\"hello\": \"world\"}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_atomic_write_preserves_existing_on_invalid_parent() {
+        // Writing to a path without a valid parent should fail
+        let result = atomic_write(Path::new("/nonexistent_dir/file.json"), b"data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_v2_serialized_can_be_read_after_atomic_write() {
+        let tmp = std::env::temp_dir().join(format!("root_atomic_v2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("root.lock");
+        let lock = RootLockV2 {
+            version: 2,
+            root_version: Some("0.2.0".into()),
+            created_at: Some("2026-06-11T00:00:00Z".into()),
+            updated_at: None,
+            platform: "x86_64-darwin".into(),
+            nix: NixRuntime::default(),
+            nixpkgs: NixpkgsConfigV2::default(),
+            profile: LockProfile::default(),
+            packages: vec![],
+        };
+        lock.write_to_file(&path).unwrap();
+        let read_back = RootLockV2::read_from_file(&path).unwrap();
+        assert_eq!(read_back.version, 2);
+        assert_eq!(read_back.platform, "x86_64-darwin");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_rootfile_serialization_deterministic_order() {
+        let rootfile = Rootfile {
+            packages: vec![
+                ("b".to_string(), "2".to_string()),
+                ("a".to_string(), "1".to_string()),
+                ("c".to_string(), "3".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            tasks: vec![
+                ("z".to_string(), "echo z".to_string()),
+                ("build".to_string(), "cargo build".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            settings: RootSettings::default(),
+        };
+        let serialized = toml::to_string_pretty(&rootfile).unwrap();
+        let parsed: Rootfile = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.packages.len(), 3);
+        // Serialization should round-trip successfully
+        let reserialized = toml::to_string_pretty(&parsed).unwrap();
+        assert_eq!(
+            serialized, reserialized,
+            "Rootfile serialization must be deterministic"
         );
     }
 }

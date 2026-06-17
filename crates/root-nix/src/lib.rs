@@ -151,6 +151,12 @@ impl RealNixAdapter {
         }
     }
 
+    fn profile_path_str(&self) -> Result<&str, NixError> {
+        self.profile_path
+            .to_str()
+            .ok_or_else(|| NixError::Generic("Profile path is not valid UTF-8".to_string()))
+    }
+
     fn run_command(
         args: &[&str],
         extra_args: &[&str],
@@ -233,7 +239,7 @@ impl NixAdapter for RealNixAdapter {
 
     fn install(&self, package: &str) -> Result<(), NixError> {
         let pkg_arg = format!("nixpkgs#{}", package);
-        let profile_str = self.profile_path.to_str().unwrap();
+        let profile_str = self.profile_path_str()?;
         Self::run_command(
             &["profile", "add", &pkg_arg],
             &["--profile", profile_str],
@@ -243,7 +249,7 @@ impl NixAdapter for RealNixAdapter {
     }
 
     fn install_installable(&self, package: &str, installable: &str) -> Result<(), NixError> {
-        let profile_str = self.profile_path.to_str().unwrap();
+        let profile_str = self.profile_path_str()?;
         Self::run_command(
             &["profile", "add", installable],
             &["--profile", profile_str],
@@ -253,12 +259,12 @@ impl NixAdapter for RealNixAdapter {
     }
 
     fn list(&self) -> Result<String, NixError> {
-        let profile_str = self.profile_path.to_str().unwrap();
+        let profile_str = self.profile_path_str()?;
         Self::run_command(&["profile", "list"], &["--profile", profile_str], None)
     }
 
     fn remove(&self, package_or_index: &str) -> Result<(), NixError> {
-        let profile_str = self.profile_path.to_str().unwrap();
+        let profile_str = self.profile_path_str()?;
         Self::run_command(
             &["profile", "remove", package_or_index],
             &["--profile", profile_str],
@@ -268,7 +274,7 @@ impl NixAdapter for RealNixAdapter {
     }
 
     fn profile_list_json(&self) -> Result<String, NixError> {
-        let profile_str = self.profile_path.to_str().unwrap();
+        let profile_str = self.profile_path_str()?;
         Self::run_command(
             &["profile", "list", "--json"],
             &["--profile", profile_str],

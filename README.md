@@ -1,4 +1,4 @@
-# Root v0.1.9
+# Root v0.2.0
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -8,13 +8,65 @@ undo it — without needing to learn Nix.
 [![CI](https://github.com/sgr0691/Root/actions/workflows/ci.yml/badge.svg)](https://github.com/sgr0691/Root/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+## What v0.2.0 Changed
+
+v0.2.0 is the **Roadmap Phases 1–6** release:
+
+- **Complete package workflow** — Search the curated catalog and update one or
+  all managed packages with `root search` and `root update`.
+- **Machine reproducibility** — Reconcile current v2 locks with `root sync` or
+  rebuild a Root-managed profile from a shared lock with `root restore`.
+- **Reproducible execution** — Define `[tasks]` in `Rootfile` and execute tasks,
+  workflow files, or ad hoc commands through `root run`.
+- **Permissions and policies** — Inspect active permissions with
+  `root permissions` and activate TOML policies with `root policy apply`.
+- **Docker-backed sandboxes** — Create, execute in, list, and destroy disposable
+  Root-managed sandboxes through `root sandbox`.
+- **Machine drift reporting** — `root status` compares Rootfile intent,
+  lock state, and the Root-managed profile while maintaining machine identity.
+- **Structured history** — Execution, policy, sandbox, restore, and update
+  decisions are recorded in the event ledger and exposed through JSON output.
+
 ## Install
+
+Root requires **Nix**. If Nix is not found, the installer offers to install it
+for you using the [official Determinate Systems installer](https://install.determinate.systems/nix).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sgr0691/Root/main/scripts/install.sh | sh
 ```
 
-## Try Root in 60 seconds
+The installer will:
+
+1. Check for Nix.
+2. If Nix is missing, explain the dependency and ask for confirmation.
+3. If confirmed, install Nix (this may modify your shell profile and create
+   `/nix`).
+4. Download and install the Root binary.
+5. Run `root doctor` to verify everything is ready.
+
+### Manual install (install Nix first)
+
+If you prefer to install Nix yourself:
+
+```bash
+# Install Nix (one of these options):
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+
+# Or use the official multi-user installer:
+# sh <(curl -L https://nixos.org/nix/install)
+
+# Then install Root:
+curl -fsSL https://raw.githubusercontent.com/sgr0691/Root/main/scripts/install.sh | sh
+```
+
+The Root installer downloads the Root binary to a temporary directory, verifies
+its SHA-256 checksum against the published checksum file, extracts it, and
+installs it to `/usr/local/bin`. If any verification step fails, the installer
+exits without installing. Use `--yes` to skip the Nix installation prompt
+(e.g., for CI environments). Use `--dry-run` to preview what would be done.
+
+## Quickstart
 
 ```bash
 # 1. Browse the curated catalog
@@ -26,11 +78,11 @@ root plan install ripgrep
 # 3. Install
 root install ripgrep
 
-# 4. See what happened
-root history
-
-# 5. Verify the binary works
+# 4. Verify the binary works
 root verify ripgrep
+
+# 5. See what happened
+root history
 
 # 6. Undo the install
 root rollback --last
@@ -39,113 +91,63 @@ root rollback --last
 That's it. Every install is recorded, every binary is verified, and every change
 can be undone — all without learning Nix.
 
+Install times vary depending on network speed and Nix store state. First installs
+may take several minutes while Nix resolves and downloads dependencies.
+
 ## Core Commands
+
+All commands support `--json` for structured output (useful for scripting).
 
 | Command | Description |
 |---------|-------------|
+| `root init [--install-nix]` | Initialize Root directory structure (auto-run on first mutation) |
 | `root catalog` | Browse the curated package catalog |
-| `root doctor` | Check that Root and Nix are ready |
-| `root install ripgrep` | Install a package via Nix with deterministic lock |
+| `root search rg` | Search package names, aliases, categories, and metadata |
 | `root plan install ripgrep` | Preview what an install would do (no changes made) |
+| `root install ripgrep` | Install a package via Nix with deterministic lock |
+| `root list` | List installed packages |
+| `root remove <package>` | Remove an installed package |
+| `root update [package]` | Update one package or all Rootfile packages |
+| `root lock` | Regenerate deterministic lockfile from current Rootfile |
+| `root sync` | Reconcile the Root profile with `root.lock` |
+| `root restore --lock ./root.lock` | Restore from a local or shared lockfile |
+| `root run <task>` | Run a Rootfile task in the Root-managed environment |
+| `root run <workflow-file>` | Run commands from a TOML workflow file |
+| `root run -- <command...>` | Run an ad hoc command in the Root-managed environment |
+| `root sandbox create [--name <name>] [--image <image>]` | Create a Docker-backed disposable sandbox |
+| `root sandbox run <id> -- <command...>` | Execute a command in a running sandbox |
+| `root sandbox list` | List all Root-managed sandboxes |
+| `root sandbox destroy <id>` | Destroy a Root-managed sandbox |
+| `root status` | Show machine identity and Root-managed drift |
+| `root doctor` | Check that Root and Nix are ready |
 | `root history` | Show snapshot summaries and event ledger |
 | `root verify ripgrep` | Verify installed package binaries are functional |
 | `root rollback --last` | Roll back to the last snapshot using locked state |
+| `root permissions` | Show the active policy configuration |
+| `root policy apply policy.toml` | Validate and activate a policy file |
+| `root import brew` | (*Experimental*) Import Homebrew packages into a Rootfile |
 
 ## Supported Packages
 
-Root curates a catalog of 42 developer CLI tools across eleven categories:
+Root curates a catalog of **42 developer CLI tools** across **eleven categories**:
 
-### media
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| ffmpeg | Video/audio processing | nixpkgs#ffmpeg | ffmpeg | ffmpeg -version |
-| imagemagick | Image manipulation | nixpkgs#imagemagick | magick, convert | magick --version |
-| poppler | PDF utilities | nixpkgs#poppler | pdftotext, pdfinfo | pdftotext -v, pdfinfo -v |
+| Category | Packages |
+|----------|----------|
+| media | ffmpeg, imagemagick, poppler |
+| search | ripgrep, fd, fzf |
+| dev | bat, bun, eza, gh, git-lfs, gnumake, httpie, jq, just, nodejs, openssl, pkg-config, python3, sqlite, tree, uv |
+| net | curl, wget |
+| language | go, rustup |
+| database | postgresql, redis |
+| infrastructure | terraform, kubectl, helm, k9s, docker-client |
+| security | age, sops |
+| editor | neovim |
+| git | git-delta, lazygit |
+| terminal | tmux, zoxide, direnv, starship |
 
-### search
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| ripgrep | Fast recursive search | nixpkgs#ripgrep | rg | rg --version |
-| fd | Fast file finder | nixpkgs#fd | fd | fd --version |
-| fzf | Fuzzy file finder | nixpkgs#fzf | fzf | fzf --version |
-
-### dev
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| bat | File viewer with syntax highlighting | nixpkgs#bat | bat | bat --version |
-| bun | JavaScript runtime and bundler | nixpkgs#bun | bun | bun --version |
-| eza | Modern ls replacement | nixpkgs#eza | eza | eza --version |
-| gh | GitHub CLI | nixpkgs#gh | gh | gh --version |
-| git-lfs | Git large file storage | nixpkgs#git-lfs | git-lfs | git-lfs --version |
-| gnumake | Build automation | nixpkgs#gnumake | make | make --version |
-| httpie | HTTP client | nixpkgs#httpie | http | http --version |
-| jq | JSON processor | nixpkgs#jq | jq | jq --version |
-| just | Command runner | nixpkgs#just | just | just --version |
-| nodejs | JavaScript runtime | nixpkgs#nodejs | node, npm | node --version |
-| openssl | Cryptography toolkit | nixpkgs#openssl | openssl | openssl version |
-| pkg-config | Package configuration | nixpkgs#pkg-config | pkg-config | pkg-config --version |
-| python3 | Python interpreter | nixpkgs#python3 | python3 | python3 --version |
-| sqlite | SQL database engine | nixpkgs#sqlite | sqlite3 | sqlite3 --version |
-| tree | Directory tree viewer | nixpkgs#tree | tree | tree --version |
-| uv | Python package manager | nixpkgs#uv | uv | uv --version |
-
-### net
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| curl | URL transfer tool | nixpkgs#curl | curl | curl --version |
-| wget | URL downloader | nixpkgs#wget | wget | wget --version |
-
-### language
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| go | Go programming language toolchain | nixpkgs#go | go | go version |
-| rustup | Rust toolchain installer and manager | nixpkgs#rustup | rustup | rustup --version |
-
-### database
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| postgresql | PostgreSQL database server and CLI tools | nixpkgs#postgresql | psql, postgres | psql --version, postgres --version |
-| redis | Redis server and command-line client | nixpkgs#redis | redis-server, redis-cli | redis-server --version, redis-cli --version |
-
-### infrastructure
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| terraform | Infrastructure as code CLI | nixpkgs#terraform | terraform | terraform version |
-| kubectl | Kubernetes command-line tool | nixpkgs#kubectl | kubectl | kubectl version --client |
-| helm | Kubernetes package manager | nixpkgs#kubernetes-helm | helm | helm version --short |
-| k9s | Terminal UI for Kubernetes clusters | nixpkgs#k9s | k9s | k9s version |
-| docker-client | Docker CLI client (not Docker Desktop/daemon) | nixpkgs#docker-client | docker | docker --version |
-
-### security
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| age | Simple modern file encryption tool | nixpkgs#age | age, age-keygen | age --version, age-keygen --version |
-| sops | Editor for encrypted secrets | nixpkgs#sops | sops | sops --version |
-
-### editor
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| neovim | Modern Vim-based text editor | nixpkgs#neovim | nvim | nvim --version |
-
-### git
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| git-delta | Syntax-highlighted Git diff viewer | nixpkgs#git-delta | delta | delta --version |
-| lazygit | Terminal UI for Git workflows | nixpkgs#lazygit | lazygit | lazygit --version |
-
-### terminal
-| Package | Description | Nix attribute | Binaries | Verify |
-|---------|-------------|---------------|----------|--------|
-| tmux | Terminal multiplexer | nixpkgs#tmux | tmux | tmux -V |
-| zoxide | Smarter directory navigation for the terminal | nixpkgs#zoxide | zoxide | zoxide --version |
-| direnv | Automatically loads and unloads environment variables per directory | nixpkgs#direnv | direnv | direnv version |
-| starship | Cross-shell customizable prompt | nixpkgs#starship | starship | starship --version |
-
-Each package's metadata (Nix attribute, expected binaries, and verification
-commands) is defined in the `PackageSpec` catalog inside `root-core`. New
-packages are easy to add without changing the install or lock logic.
-
-Run `root catalog` to see the full list at any time.
+Run `root catalog` to see the full list with Nix attributes and verification
+commands at any time. Each package's metadata is defined in the `PackageSpec`
+catalog inside `root-core`, making new packages easy to add.
 
 ## Why curated packages first?
 
@@ -164,28 +166,6 @@ Root uses a curated allowlist for safety:
 
 Arbitrary `root install <anything>` support is planned for a future release.
 Until then, unsupported packages get a clear error message with the full catalog.
-
-## Example flow
-
-```bash
-# List what's available
-root catalog
-
-# Preview before installing
-root plan install ripgrep
-
-# Install
-root install ripgrep
-
-# Verify the binary works from the Root-managed profile
-root verify ripgrep
-
-# See all operations
-root history
-
-# Undo the last change
-root rollback --last
-```
 
 ## What v0.1.9 Changed
 
@@ -284,7 +264,51 @@ v0.1.3 is the **Curated Package Catalog** release:
   one verification command. `root verify <pkg>` checks the Root-managed
   profile path, not the user's global PATH.
 
-## How It Works
+## Rootfile (`~/.root/Rootfile`)
+
+The Rootfile is a TOML file at `~/.root/Rootfile` that declares which packages
+and tasks Root manages. It is created automatically when you install your first
+package.
+
+```toml
+[packages]
+ripgrep = "latest"
+ffmpeg  = "latest"
+fd      = "latest"
+
+[tasks]
+build   = "cargo build --release"
+test    = "cargo test --all"
+lint    = "cargo clippy -- -D warnings"
+
+[settings]
+snapshots     = true
+verify_installs = true
+```
+
+### Sections
+
+| Section | Required | Description |
+|---------|----------|-------------|
+| `[packages]` | No | Package name → version mappings (e.g., `ripgrep = "latest"`) |
+| `[tasks]` | No | Task name → shell command mappings (e.g., `build = "cargo build"`) |
+| `[settings]` | No | Global settings (`snapshots`, `verify_installs` — both default to `true`) |
+
+Use `root list` to show installed packages, `root remove <package>` to uninstall,
+and `root run <task-name>` to execute a task in the Root-managed environment.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Rootfile** | TOML file at `~/.root/Rootfile` — your intent (packages and tasks you want) |
+| **root.lock** | JSON file at `~/.root/root.lock` — the deterministic lock with pinned Nix metadata |
+| **Snapshot** | JSON file at `~/.root/snapshots/` — a pre-mutation copy of the lock state for rollback |
+| **Event ledger** | JSONL file at `~/.root/events.jsonl` — an append-only audit trail of every operation |
+| **Mutation lock** | File at `~/.root/root.lockfile` — a process-level mutex preventing concurrent mutations |
+| **Profile** | Nix profile at `~/.root/profiles/default` — an isolated Nix profile for Root-managed binaries |
+
+### How It Works
 
 Root manages an isolated Nix profile at `~/.root/profiles/default` — it never
 touches your default Nix or Homebrew profiles.
@@ -294,7 +318,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.1.9)
+## Limitations (v0.2.0)
 
 - **Curated catalog only.** Root supports a curated catalog only — 42 packages
   across eleven categories. Arbitrary `root install <anything>` is not yet
@@ -302,41 +326,44 @@ from the Root-managed profile, not from PATH.
   message.
 - **`docker-client` installs the Docker CLI only**, not Docker Desktop or a
   Docker daemon. You need a separate Docker daemon to run containers.
+- **Sandboxing requires an available Docker daemon.** Root fails with a
+  capability error when Docker is unavailable and does not claim isolation.
+- **Machine sharing is file-based.** Phase 6 supports local and Git-shared
+  `Rootfile` and `root.lock` workflows; hosted multi-device sync is deferred.
+- **`root run` is reproducible execution, not isolation.** Use `root sandbox run`
+  when a disposable Docker container boundary is required.
 - **Rollback applies only to Root-managed packages.** Root cannot undo
   changes made by Homebrew, manual installs, or other tools.
 - **Nix must be installed.** Root manages a Nix profile but does not
   bundle Nix.
-- **Stale lockfiles.** If Root crashes during a mutation, delete
-  `~/.root/root.lockfile` manually to recover.
-- **macOS only.** Apple Silicon and Intel are supported. Linux is detected
-  but not officially supported. Windows is not available.
+- **Mutation lock recovery.** If Root crashes during a mutation, the mutation
+  lock (`~/.root/root.lockfile`) may need to be deleted manually to unblock
+  future operations. Run `root doctor` first if you encounter lock errors.
+- **Offline not supported.** Every install and update requires network access
+  to resolve Nix flakes.
+- **No concurrent operations.** Root uses a file-based mutation lock that
+  prevents multiple simultaneous operations.
+- **macOS is the primary platform.** macOS (Apple Silicon and Intel) is fully
+  tested. Linux (aarch64 and x86_64) is supported by the codebase but not
+  officially tested. Windows is not available.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.1.9 public
+The CLI includes additional commands that are **not part of the v0.2.0 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
 |---------|--------|
-| `root init` | Experimental |
-| `root plan install <pkg>` | Experimental |
-| `root remove <pkg>` | Experimental |
-| `root list` | Experimental |
-| `root lock` | Experimental |
-| `root sync` | Experimental — does not operate on v2 locks |
-| `root import brew` | Experimental |
-| `--json` on all commands | Experimental |
+| `root import brew` | Experimental — imports Homebrew packages into a Rootfile |
 
 These exist for development and early testing. Do not rely on them for
 production use.
 
 ## Roadmap
 
-- **v0.2** — Arbitrary package install support, expanded platform support
-- **v0.3** — Agent skill packs for Codex, Claude, and Cursor
-- **v0.4** — Linux support (platform detection already in place)
-- **v0.5** — Permissions, sandboxes, project environments, menu bar app
-- **Future** — Desktop app, team sync, cloud features
+- **v0.2.x** — Harden the Phase 1–6 package, runtime, policy, sandbox, and sync surface
+- **v0.3** — Local model management with an Ollama-compatible adapter
+- **Later** — AI-native manifests, residency policies, and explainable routing
 
 See [Docs](Docs/) for the full plan.
 
@@ -347,6 +374,9 @@ See [Docs](Docs/) for the full plan.
 - Nix profile isolation — no global PATH pollution
 - Structured event ledger — every change is recorded
 - Post-install and post-rollback profile verification
+- Mutation lock prevents concurrent operations (with stale-PID recovery)
+- Atomic writes prevent lockfile corruption on crash
+- Snapshot content hashes are validated on read
 - All Nix operations target `~/.root/profiles/default`, not the user profile
 
 ## Development

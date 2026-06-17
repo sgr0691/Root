@@ -3,15 +3,21 @@ use root_lockfile::get_root_dir;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RootEventType {
     Doctor,
     Install,
+    Update,
     Remove,
     Verification,
     VerificationFailed,
     Rollback,
+    Restore,
+    Execution,
+    Policy,
+    Sandbox,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,6 +39,18 @@ pub struct RootEvent {
     pub snapshot_id: Option<String>,
     pub restored_snapshot_id: Option<String>,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_decision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +62,7 @@ fn generate_event_id() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or(Duration::ZERO);
     let secs = now.as_secs();
     let micros = now.subsec_micros();
     let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
@@ -57,7 +75,7 @@ fn now_iso() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or(Duration::ZERO);
     let secs = now.as_secs();
     chrono::DateTime::from_timestamp(secs as i64, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
@@ -125,7 +143,65 @@ pub fn create_event(
         snapshot_id,
         restored_snapshot_id,
         message,
+        task_name: None,
+        exit_code: None,
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        policy_decision: None,
     }
+}
+
+pub struct ExecutionEventDetails {
+    pub task_name: Option<String>,
+    pub exit_code: Option<i32>,
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: u64,
+    pub message: Option<String>,
+}
+
+pub fn record_execution_event(
+    command: &str,
+    status: RootEventStatus,
+    details: ExecutionEventDetails,
+) -> Result<RootEvent> {
+    let mut event = create_event(
+        RootEventType::Execution,
+        status,
+        command,
+        None,
+        None,
+        None,
+        details.message,
+    );
+    event.task_name = details.task_name;
+    event.exit_code = details.exit_code;
+    event.started_at = Some(details.started_at);
+    event.finished_at = Some(details.finished_at);
+    event.duration_ms = Some(details.duration_ms);
+    append_event(&event)?;
+    Ok(event)
+}
+
+pub fn record_policy_event(
+    command: &str,
+    status: RootEventStatus,
+    decision: &str,
+    message: String,
+) -> Result<RootEvent> {
+    let mut event = create_event(
+        RootEventType::Policy,
+        status,
+        command,
+        None,
+        None,
+        None,
+        Some(message),
+    );
+    event.policy_decision = Some(decision.to_string());
+    append_event(&event)?;
+    Ok(event)
 }
 
 pub fn record_event(

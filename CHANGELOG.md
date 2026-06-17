@@ -5,6 +5,42 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-10
+
+### Added
+
+- `root search <query>` across curated package names, aliases, categories,
+  descriptions, binaries, and Nix attributes.
+- `root update [package]` with deterministic re-resolution, pre-mutation
+  snapshots, profile verification, lock updates, and history records.
+- v2-compatible `root sync` and `root restore [--lock <path>]` for local and
+  Git-shared machine restoration workflows.
+- `root run <task|workflow-file|-- command...>` and `[tasks]` Rootfile support,
+  with Root-profile-first PATH handling and structured execution history.
+- `root permissions` and `root policy apply <file>` with package, command,
+  sandbox, resource, and agent-approval rules.
+- Docker-backed `root sandbox create`, `run`, `list`, and `destroy` commands
+  behind a `SandboxProvider` abstraction and mock provider tests.
+- `root status` machine identity and drift reporting across Rootfile, lockfile,
+  and Root-managed profile state.
+- Policy, execution, sandbox, restore, and update event metadata in history.
+
+### Changed
+
+- Workspace version advanced to 0.2.0 for the first release of Roadmap Phases
+  1–6.
+- Current v0.1 commands remain backward compatible while the supported public
+  CLI surface expands.
+- Policy denials occur before snapshots or Root-managed machine mutations.
+
+### Fixed
+
+- `root sync` now handles current v2 lockfiles instead of rejecting them.
+- Sandbox policy actions use explicit create, run, and destroy permissions
+  rather than package-sync policy settings.
+- `root status` no longer reports a healthy machine when the Root-managed Nix
+  profile cannot be inspected; it reports `NeedsAttention` with a doctor hint.
+
 ## [0.1.9] - 2026-06-08
 
 ### Added

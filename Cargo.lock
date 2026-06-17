@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "root-agent"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -452,35 +452,38 @@ dependencies = [
 
 [[package]]
 name = "root-cli"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "root-core",
  "root-doctor",
  "root-nix",
+ "root-sandbox",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "root-core"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
  "root-doctor",
  "root-lockfile",
  "root-nix",
+ "root-sandbox",
  "root-snapshot",
  "root-verify",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
 name = "root-doctor"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "root-lockfile",
@@ -491,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "root-lockfile"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -504,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "root-nix"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -512,8 +515,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "root-sandbox"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "root-snapshot"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -524,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "root-verify"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "root-lockfile",
