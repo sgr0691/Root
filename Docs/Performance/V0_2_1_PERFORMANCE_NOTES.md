@@ -27,8 +27,8 @@ Key findings:
 
 ### Event Ledger Scalability (Phase 4)
 - **Before**: `read_events()` loaded every event line into memory.
-- **After**: `read_events_with_limit(limit)` added. `history_with_limit(limit)` exposed via CLI as `root history --limit N`.
-- **Gain**: Bounded memory usage for large ledgers. `root history --limit 50` reads and parses only 50 lines after reversing.
+- **After**: `read_events_with_limit(limit)` added. `history_with_limit(limit)` exposed via CLI as `root history --limit N`. Uses a fixed-size rolling buffer so only the most recent N events are retained in memory.
+- **Gain**: Bounded memory usage for large ledgers. `root history --limit 50` never holds more than 50 parsed events in memory.
 
 ### Status Command Performance (Phase 5)
 - **Before**: `status()` called `profile_packages(adapter)` which shells out to Nix on every invocation.

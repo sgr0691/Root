@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Search**: Query is lowercased once instead of per-package (42×). `SearchMatch` and `CatalogEntry` use `&'static [&'static str]` for aliases and binaries, eliminating per-result heap allocations. (Phase 2)
 - **Lockfile**: Content-aware write — `save_lock_v2` and `save_lock` compare serialized output to existing file and skip the write if unchanged. Zero disk I/O when no changes occurred. (Phase 3)
 - **build_v2_lock**: Refactored to accept `&RootLockV2` directly, eliminating wasteful v2→v1→v2 conversion cycle in `install`, `update`, and `lock`. (Phase 3)
-- **Event ledger**: `root history --limit N` added to cap in-memory event loading. `read_events_with_limit(limit)` avoids parsing the entire ledger when a limit is specified. (Phase 4)
+- **Event ledger**: `root history --limit N` added. `read_events_with_limit(limit)` bounds in-memory event retention to N entries using a fixed-size rolling buffer, so large ledgers never consume more than O(N) memory. (Phase 4)
 - **Status**: Nix profile check is skipped when Rootfile and lockfile both have zero packages. Status is entirely local-only for empty states. (Phase 5)
 
 ### Memory

@@ -1155,39 +1155,35 @@ fn parse_attributes(search_output: &str) -> Vec<String> {
         .collect()
 }
 
-fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<SearchMatch> {
-    let query = query.trim();
-    if query.is_empty() {
+fn search_match_for_package(query_lower: &str, spec: &'static PackageSpec) -> Option<SearchMatch> {
+    if query_lower.is_empty() {
         return None;
     }
 
-    let query_lower = query.to_lowercase();
-    let query_ref: &str = &query_lower;
-
     let mut matched_fields = Vec::new();
-    if spec.name.to_lowercase().contains(query_ref) {
+    if spec.name.to_lowercase().contains(query_lower) {
         matched_fields.push("name");
     }
     if spec
         .aliases
         .iter()
-        .any(|alias| alias.to_lowercase().contains(query_ref))
+        .any(|alias| alias.to_lowercase().contains(query_lower))
     {
         matched_fields.push("alias");
     }
-    if spec.category.to_lowercase().contains(query_ref) {
+    if spec.category.to_lowercase().contains(query_lower) {
         matched_fields.push("category");
     }
-    if spec.description.to_lowercase().contains(query_ref) {
+    if spec.description.to_lowercase().contains(query_lower) {
         matched_fields.push("description");
     }
-    if spec.nix_attr.to_lowercase().contains(query_ref) {
+    if spec.nix_attr.to_lowercase().contains(query_lower) {
         matched_fields.push("nix_attr");
     }
     if spec
         .binaries
         .iter()
-        .any(|binary| binary.to_lowercase().contains(query_ref))
+        .any(|binary| binary.to_lowercase().contains(query_lower))
     {
         matched_fields.push("binary");
     }
@@ -1212,47 +1208,45 @@ fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<S
     })
 }
 
-fn search_rank(query: &str, package: &SearchMatch) -> u8 {
-    let query_lower = query.trim().to_lowercase();
-    let query_ref: &str = &query_lower;
-    if package.name.eq_ignore_ascii_case(query_ref) {
+fn search_rank(query_lower: &str, package: &SearchMatch) -> u8 {
+    if package.name.eq_ignore_ascii_case(query_lower) {
         return 0;
     }
     if package
         .aliases
         .iter()
-        .any(|alias| alias.eq_ignore_ascii_case(query_ref))
+        .any(|alias| alias.eq_ignore_ascii_case(query_lower))
     {
         return 1;
     }
     if package
         .binaries
         .iter()
-        .any(|binary| binary.eq_ignore_ascii_case(query_ref))
+        .any(|binary| binary.eq_ignore_ascii_case(query_lower))
     {
         return 2;
     }
-    if package.name.to_lowercase().contains(query_ref) {
+    if package.name.to_lowercase().contains(query_lower) {
         return 3;
     }
     if package
         .aliases
         .iter()
-        .any(|alias| alias.to_lowercase().contains(query_ref))
+        .any(|alias| alias.to_lowercase().contains(query_lower))
     {
         return 4;
     }
     if package
         .binaries
         .iter()
-        .any(|binary| binary.to_lowercase().contains(query_ref))
+        .any(|binary| binary.to_lowercase().contains(query_lower))
     {
         return 5;
     }
-    if package.category.to_lowercase().contains(query_ref) {
+    if package.category.to_lowercase().contains(query_lower) {
         return 6;
     }
-    if package.nix_attr.to_lowercase().contains(query_ref) {
+    if package.nix_attr.to_lowercase().contains(query_lower) {
         return 7;
     }
     8
@@ -1260,13 +1254,15 @@ fn search_rank(query: &str, package: &SearchMatch) -> u8 {
 
 pub fn search(query: &str) -> SearchOutput {
     let trimmed = query.trim();
+    let query_lower = trimmed.to_lowercase();
+    let query_ref: &str = &query_lower;
     let mut matches: Vec<SearchMatch> = SUPPORTED_PACKAGES
         .iter()
-        .filter_map(|spec| search_match_for_package(trimmed, spec))
+        .filter_map(|spec| search_match_for_package(query_ref, spec))
         .collect();
     matches.sort_by(|a, b| {
-        search_rank(trimmed, a)
-            .cmp(&search_rank(trimmed, b))
+        search_rank(query_ref, a)
+            .cmp(&search_rank(query_ref, b))
             .then_with(|| a.name.cmp(b.name))
     });
 
@@ -4741,9 +4737,13 @@ mod tests {
 
         let hist = history().unwrap();
         assert_eq!(hist.events.len(), 2);
-        assert!(
-            hist.events[0].command == "second" || hist.events[0].command == "first",
-            "Events should be in reverse chronological order"
+        assert_eq!(
+            hist.events[0].command, "second",
+            "Most recent event should be first"
+        );
+        assert_eq!(
+            hist.events[1].command, "first",
+            "Older event should be second"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -113,7 +113,7 @@ pub fn read_events_with_limit(limit: Option<usize>) -> Result<Vec<RootEvent>> {
     let file = fs::File::open(&path)
         .with_context(|| format!("Failed to open events file at {:?}", path))?;
     let reader = BufReader::new(file);
-    let mut events = Vec::new();
+    let mut events: std::collections::VecDeque<RootEvent> = std::collections::VecDeque::new();
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
@@ -121,14 +121,13 @@ pub fn read_events_with_limit(limit: Option<usize>) -> Result<Vec<RootEvent>> {
             continue;
         }
         if let Ok(event) = serde_json::from_str::<RootEvent>(line) {
-            events.push(event);
+            if limit.map(|l| events.len() >= l).unwrap_or(false) {
+                events.pop_front();
+            }
+            events.push_back(event);
         }
     }
-    events.reverse();
-    if let Some(limit) = limit {
-        events.truncate(limit);
-    }
-    Ok(events)
+    Ok(events.into_iter().rev().collect())
 }
 
 pub fn create_event(
