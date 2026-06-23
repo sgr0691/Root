@@ -92,7 +92,7 @@ pub struct LockedPackage {
 }
 
 /// RootLock v2 JSON format with deterministic Nix resolution metadata.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
 pub struct RootLockV2 {
     #[serde(default = "default_root_lock_schema_version")]
     pub version: u32,
@@ -242,6 +242,13 @@ impl RootLock {
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize root.lock")?;
+        if path.exists() {
+            if let Ok(existing) = fs::read_to_string(path) {
+                if existing == content {
+                    return Ok(());
+                }
+            }
+        }
         atomic_write(path, content.as_bytes()).context("Failed to write root.lock")?;
         Ok(())
     }
@@ -331,8 +338,25 @@ impl RootLockV2 {
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize root.lock v2")?;
+        if path.exists() {
+            if let Ok(existing) = fs::read_to_string(path) {
+                if existing == content {
+                    return Ok(());
+                }
+            }
+        }
         atomic_write(path, content.as_bytes()).context("Failed to write root.lock")?;
         Ok(())
+    }
+
+    /// Returns true if writing this lock to the given path would change the file contents.
+    pub fn would_change_file(&self, path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(true);
+        }
+        let existing = fs::read_to_string(path)?;
+        let content = serde_json::to_string_pretty(self)?;
+        Ok(existing != content)
     }
 }
 
