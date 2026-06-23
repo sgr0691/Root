@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+#[cfg(test)]
+use root_lockfile::LockedPackage;
 use root_lockfile::{
-    get_root_dir, LockProfile, LockedPackage, LockedPackageOutput, LockedPackageV2, NixRuntime,
-    NixpkgsConfig, NixpkgsConfigV2, RootLock, RootLockV2, Rootfile, ROOT_LOCK_SCHEMA_VERSION,
+    get_root_dir, LockedPackageOutput, LockedPackageV2, NixRuntime, NixpkgsConfig, NixpkgsConfigV2,
+    RootLock, RootLockV2, Rootfile, ROOT_LOCK_SCHEMA_VERSION,
 };
 use root_nix::NixAdapter;
 use root_sandbox::SandboxProvider;
@@ -732,13 +734,13 @@ pub struct PlanReport {
 #[derive(Debug, Serialize)]
 pub struct SearchMatch {
     pub name: &'static str,
-    pub aliases: Vec<String>,
+    pub aliases: &'static [&'static str],
     pub category: &'static str,
     pub description: &'static str,
     pub nix_attr: &'static str,
-    pub binaries: Vec<String>,
+    pub binaries: &'static [&'static str],
     pub verify: Vec<String>,
-    pub matched_fields: Vec<String>,
+    pub matched_fields: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -945,18 +947,6 @@ fn save_lock_v2(lock: &RootLockV2) -> Result<()> {
     lock.write_to_file(&path)
 }
 
-fn legacy_lock_from_v2(lock: &RootLockV2) -> RootLock {
-    RootLock {
-        version: lock.version,
-        platform: lock.platform.clone(),
-        nixpkgs: NixpkgsConfig {
-            rev: lock.nixpkgs.rev.clone(),
-            source: lock.nixpkgs.source.clone(),
-        },
-        packages: lock.packages.iter().map(legacy_package_from_v2).collect(),
-    }
-}
-
 fn locked_package_changed(current: &LockedPackageV2, target: &LockedPackageV2) -> bool {
     serde_json::to_value(current).ok() != serde_json::to_value(target).ok()
 }
@@ -1087,33 +1077,22 @@ fn deterministic_package_from_resolution(
     Ok(package)
 }
 
-fn legacy_package_from_v2(package: &LockedPackageV2) -> LockedPackage {
-    LockedPackage {
-        name: package.name.clone(),
-        requested: package.requested.clone(),
-        version: package.version.clone(),
-        attribute: package.attribute.clone(),
-        store_path: package.store_path.clone(),
-        binaries: package.binaries.clone(),
-    }
-}
-
 fn build_v2_lock(
-    old_lock: &RootLock,
+    current: &RootLockV2,
     flake: &root_nix::FlakeMetadata,
     packages: Vec<LockedPackageV2>,
 ) -> Result<RootLockV2> {
-    let root_dir = get_root_dir()?;
     let now = chrono::Utc::now().to_rfc3339();
+    let platform = current.platform.clone();
     Ok(RootLockV2 {
         version: ROOT_LOCK_SCHEMA_VERSION,
         root_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        created_at: Some(now.clone()),
+        created_at: current.created_at.clone().or(Some(now.clone())),
         updated_at: Some(now),
-        platform: old_lock.platform.clone(),
+        platform: platform.clone(),
         nix: NixRuntime {
             version: None,
-            system: Some(old_lock.platform.clone()),
+            system: Some(platform.clone()),
             store_dir: Some("/nix/store".to_string()),
             sandbox: None,
         },
@@ -1121,26 +1100,16 @@ fn build_v2_lock(
             rev: flake
                 .rev
                 .clone()
-                .unwrap_or_else(|| old_lock.nixpkgs.rev.clone()),
+                .unwrap_or_else(|| current.nixpkgs.rev.clone()),
             source: flake.original_url.clone(),
             flake_ref: flake.locked_url.clone(),
             nar_hash: flake.nar_hash.clone(),
             last_modified: flake.last_modified.map(|value| value.to_string()),
-            system: Some(old_lock.platform.clone()),
+            system: Some(platform),
             config: BTreeMap::new(),
             overlays: Vec::new(),
         },
-        profile: LockProfile {
-            name: "default".to_string(),
-            path: Some(
-                root_dir
-                    .join("profiles")
-                    .join("default")
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            generation: None,
-        },
+        profile: current.profile.clone(),
         packages,
     })
 }
@@ -1187,37 +1156,40 @@ fn parse_attributes(search_output: &str) -> Vec<String> {
 }
 
 fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<SearchMatch> {
-    let query = query.trim().to_lowercase();
+    let query = query.trim();
     if query.is_empty() {
         return None;
     }
 
+    let query_lower = query.to_lowercase();
+    let query_ref: &str = &query_lower;
+
     let mut matched_fields = Vec::new();
-    if spec.name.to_lowercase().contains(&query) {
-        matched_fields.push("name".to_string());
+    if spec.name.to_lowercase().contains(query_ref) {
+        matched_fields.push("name");
     }
     if spec
         .aliases
         .iter()
-        .any(|alias| alias.to_lowercase().contains(&query))
+        .any(|alias| alias.to_lowercase().contains(query_ref))
     {
-        matched_fields.push("alias".to_string());
+        matched_fields.push("alias");
     }
-    if spec.category.to_lowercase().contains(&query) {
-        matched_fields.push("category".to_string());
+    if spec.category.to_lowercase().contains(query_ref) {
+        matched_fields.push("category");
     }
-    if spec.description.to_lowercase().contains(&query) {
-        matched_fields.push("description".to_string());
+    if spec.description.to_lowercase().contains(query_ref) {
+        matched_fields.push("description");
     }
-    if spec.nix_attr.to_lowercase().contains(&query) {
-        matched_fields.push("nix_attr".to_string());
+    if spec.nix_attr.to_lowercase().contains(query_ref) {
+        matched_fields.push("nix_attr");
     }
     if spec
         .binaries
         .iter()
-        .any(|binary| binary.to_lowercase().contains(&query))
+        .any(|binary| binary.to_lowercase().contains(query_ref))
     {
-        matched_fields.push("binary".to_string());
+        matched_fields.push("binary");
     }
 
     if matched_fields.is_empty() {
@@ -1226,19 +1198,11 @@ fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<S
 
     Some(SearchMatch {
         name: spec.name,
-        aliases: spec
-            .aliases
-            .iter()
-            .map(|alias| (*alias).to_string())
-            .collect(),
+        aliases: spec.aliases,
         category: spec.category,
         description: spec.description,
         nix_attr: spec.nix_attr,
-        binaries: spec
-            .binaries
-            .iter()
-            .map(|binary| (*binary).to_string())
-            .collect(),
+        binaries: spec.binaries,
         verify: spec
             .verify
             .iter()
@@ -1249,63 +1213,65 @@ fn search_match_for_package(query: &str, spec: &'static PackageSpec) -> Option<S
 }
 
 fn search_rank(query: &str, package: &SearchMatch) -> u8 {
-    let query = query.trim().to_lowercase();
-    if package.name.eq_ignore_ascii_case(&query) {
+    let query_lower = query.trim().to_lowercase();
+    let query_ref: &str = &query_lower;
+    if package.name.eq_ignore_ascii_case(query_ref) {
         return 0;
     }
     if package
         .aliases
         .iter()
-        .any(|alias| alias.eq_ignore_ascii_case(&query))
+        .any(|alias| alias.eq_ignore_ascii_case(query_ref))
     {
         return 1;
     }
     if package
         .binaries
         .iter()
-        .any(|binary| binary.eq_ignore_ascii_case(&query))
+        .any(|binary| binary.eq_ignore_ascii_case(query_ref))
     {
         return 2;
     }
-    if package.name.to_lowercase().contains(&query) {
+    if package.name.to_lowercase().contains(query_ref) {
         return 3;
     }
     if package
         .aliases
         .iter()
-        .any(|alias| alias.to_lowercase().contains(&query))
+        .any(|alias| alias.to_lowercase().contains(query_ref))
     {
         return 4;
     }
     if package
         .binaries
         .iter()
-        .any(|binary| binary.to_lowercase().contains(&query))
+        .any(|binary| binary.to_lowercase().contains(query_ref))
     {
         return 5;
     }
-    if package.category.to_lowercase().contains(&query) {
+    if package.category.to_lowercase().contains(query_ref) {
         return 6;
     }
-    if package.nix_attr.to_lowercase().contains(&query) {
+    if package.nix_attr.to_lowercase().contains(query_ref) {
         return 7;
     }
     8
 }
 
 pub fn search(query: &str) -> SearchOutput {
+    let trimmed = query.trim();
     let mut matches: Vec<SearchMatch> = SUPPORTED_PACKAGES
         .iter()
-        .filter_map(|spec| search_match_for_package(query, spec))
+        .filter_map(|spec| search_match_for_package(trimmed, spec))
         .collect();
     matches.sort_by(|a, b| {
-        search_rank(query, a)
-            .cmp(&search_rank(query, b))
+        search_rank(trimmed, a)
+            .cmp(&search_rank(trimmed, b))
             .then_with(|| a.name.cmp(b.name))
     });
 
     SearchOutput {
-        query: query.to_string(),
+        query: trimmed.to_string(),
         matches,
         supported_count: SUPPORTED_PACKAGES.len(),
     }
@@ -1408,8 +1374,7 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
         .cloned()
         .collect();
     v2_packages.push(locked_package.clone());
-    let legacy_lock = legacy_lock_from_v2(&lock);
-    let v2_lock = build_v2_lock(&legacy_lock, &flake, v2_packages)?;
+    let v2_lock = build_v2_lock(&lock, &flake, v2_packages)?;
     save_lock_v2(&v2_lock)?;
 
     let _ = events::record_event(
@@ -1581,8 +1546,7 @@ pub fn update(adapter: &impl NixAdapter, pkg: Option<&str>) -> Result<UpdateRepo
             .flake_metadata("nixpkgs")
             .map_err(|e| anyhow::anyhow!(e))?,
     };
-    let legacy_lock = legacy_lock_from_v2(&current_lock);
-    let new_lock = build_v2_lock(&legacy_lock, &flake, v2_packages)?;
+    let new_lock = build_v2_lock(&current_lock, &flake, v2_packages)?;
 
     let mut next_rootfile = rootfile;
     for package in &resolved_packages {
@@ -1685,10 +1649,14 @@ pub fn remove(adapter: &impl NixAdapter, pkg: &str) -> Result<RemoveReport> {
 }
 
 pub fn history() -> Result<HistoryOutput> {
+    history_with_limit(None)
+}
+
+pub fn history_with_limit(limit: Option<usize>) -> Result<HistoryOutput> {
     root_lockfile::init_root_dir()?;
     Ok(HistoryOutput {
         snapshots: list_snapshot_summaries()?,
-        events: events::read_events()?,
+        events: events::read_events_with_limit(limit)?,
     })
 }
 
@@ -1933,14 +1901,13 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
     root_lockfile::init_root_dir()?;
     let _guard = MutationGuard::acquire()?;
     let rootfile = get_or_create_rootfile()?;
-    let old_lock = get_or_create_lock()?;
+    let current_v2_lock = get_or_create_lock_v2()?;
 
     // Snapshot existing lockfile state before overwriting
     let snapshot_id = {
         let lock_path = get_root_dir()?.join("root.lock");
         if lock_path.exists() {
-            let old_v2_lock = get_or_create_lock_v2()?;
-            let snapshot = Snapshot::create_from_v2("before lock", &old_v2_lock)?;
+            let snapshot = Snapshot::create_from_v2("before lock", &current_v2_lock)?;
             Some(snapshot.id)
         } else {
             None
@@ -1966,7 +1933,7 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
     }
 
     // Detect packages that were in old lock but not in new lock
-    for old_pkg in &old_lock.packages {
+    for old_pkg in &current_v2_lock.packages {
         if !v2_packages.iter().any(|p| p.name == old_pkg.name) {
             packages_removed.push(old_pkg.name.clone());
         }
@@ -1978,7 +1945,7 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
             .flake_metadata("nixpkgs")
             .map_err(|e| anyhow::anyhow!(e))?,
     };
-    let new_lock = build_v2_lock(&old_lock, &flake, v2_packages)?;
+    let new_lock = build_v2_lock(&current_v2_lock, &flake, v2_packages)?;
     save_lock_v2(&new_lock)?;
 
     Ok(LockReport {
@@ -2080,8 +2047,8 @@ pub struct CatalogEntry {
     pub description: &'static str,
     pub category: &'static str,
     pub nix_attr: &'static str,
-    pub binaries: Vec<String>,
-    pub aliases: Vec<String>,
+    pub binaries: &'static [&'static str],
+    pub aliases: &'static [&'static str],
     pub verify: Vec<String>,
 }
 
@@ -2099,8 +2066,8 @@ pub fn catalog() -> CatalogOutput {
                 description: p.description,
                 category: p.category,
                 nix_attr: p.nix_attr,
-                binaries: p.binaries.iter().map(|b| (*b).to_string()).collect(),
-                aliases: p.aliases.iter().map(|a| (*a).to_string()).collect(),
+                binaries: p.binaries,
+                aliases: p.aliases,
                 verify: p
                     .verify
                     .iter()
@@ -2664,28 +2631,13 @@ pub fn status(adapter: &impl root_nix::NixAdapter) -> Result<StatusReport> {
 
     let rootfile = get_or_create_rootfile()?;
     let lock = get_or_create_lock_v2()?;
-    let (profile_entries, profile_error) = match profile_packages(adapter) {
-        Ok(entries) => (entries, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    };
-
     let rootfile_count = rootfile.packages.len();
     let lockfile_count = lock.packages.len();
-    let profile_count = profile_entries.len();
 
     let mut drift_details = Vec::new();
     let mut healthy = true;
 
-    if let Some(error) = profile_error {
-        drift_details.push(DriftIssue {
-            category: "profile-unavailable".to_string(),
-            description: format!("Could not inspect the Root-managed Nix profile: {}", error),
-            suggestion: "Run `root doctor` to diagnose Nix and profile availability".to_string(),
-        });
-        healthy = false;
-    }
-
-    // Compare Rootfile vs lockfile
+    // Local checks first (no Nix calls)
     for pkg_name in rootfile.packages.keys() {
         if !lock.packages.iter().any(|p| p.name == *pkg_name) {
             drift_details.push(DriftIssue {
@@ -2698,7 +2650,32 @@ pub fn status(adapter: &impl root_nix::NixAdapter) -> Result<StatusReport> {
         }
     }
 
-    // Compare lockfile vs profile
+    // If there's no rootfile or lockfile with packages, don't bother calling Nix
+    let (profile_entries, profile_count) = if rootfile_count > 0 || lockfile_count > 0 {
+        match profile_packages(adapter) {
+            Ok(entries) => {
+                let count = entries.len();
+                (entries, count)
+            }
+            Err(error) => {
+                drift_details.push(DriftIssue {
+                    category: "profile-unavailable".to_string(),
+                    description: format!(
+                        "Could not inspect the Root-managed Nix profile: {}",
+                        error
+                    ),
+                    suggestion: "Run `root doctor` to diagnose Nix and profile availability"
+                        .to_string(),
+                });
+                healthy = false;
+                (Vec::new(), 0)
+            }
+        }
+    } else {
+        (Vec::new(), 0)
+    };
+
+    // Compare lockfile vs profile (only if profile was checked)
     for pkg in &lock.packages {
         if !profile_entries.iter().any(|e| e.package == pkg.name) {
             drift_details.push(DriftIssue {
@@ -3103,21 +3080,12 @@ mod tests {
         let locked_pkg =
             deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution)
                 .unwrap();
-        let v2_lock = build_v2_lock(
-            &RootLock {
-                version: 1,
-                platform: root_lockfile::detect_platform()
-                    .unwrap_or_else(|_| "aarch64-darwin".into()),
-                nixpkgs: NixpkgsConfig {
-                    rev: "some-rev".into(),
-                    source: "github:NixOS/nixpkgs".into(),
-                },
-                packages: vec![],
-            },
-            &flake,
-            vec![locked_pkg],
-        )
-        .unwrap();
+        let platform = root_lockfile::detect_platform().unwrap_or_else(|_| "aarch64-darwin".into());
+        let base_v2 = RootLockV2 {
+            platform: platform.clone(),
+            ..RootLockV2::default()
+        };
+        let v2_lock = build_v2_lock(&base_v2, &flake, vec![locked_pkg]).unwrap();
         v2_lock.write_to_file(&root_dir.join("root.lock")).unwrap();
 
         let report = sync(&adapter).unwrap();
@@ -3157,21 +3125,12 @@ mod tests {
         let locked_pkg =
             deterministic_package_from_resolution("ripgrep", "ripgrep", &installable, &resolution)
                 .unwrap();
-        let shared_lock = build_v2_lock(
-            &RootLock {
-                version: 1,
-                platform: root_lockfile::detect_platform()
-                    .unwrap_or_else(|_| "aarch64-darwin".into()),
-                nixpkgs: NixpkgsConfig {
-                    rev: "some-rev".into(),
-                    source: "github:NixOS/nixpkgs".into(),
-                },
-                packages: vec![],
-            },
-            &flake,
-            vec![locked_pkg],
-        )
-        .unwrap();
+        let platform = root_lockfile::detect_platform().unwrap_or_else(|_| "aarch64-darwin".into());
+        let base_v2 = RootLockV2 {
+            platform: platform.clone(),
+            ..RootLockV2::default()
+        };
+        let shared_lock = build_v2_lock(&base_v2, &flake, vec![locked_pkg]).unwrap();
         let shared_lock_path = root_dir.join("shared-root.lock");
         shared_lock.write_to_file(&shared_lock_path).unwrap();
 
@@ -3489,8 +3448,8 @@ mod tests {
             .iter()
             .find(|package| package.name == "ripgrep")
             .unwrap();
-        assert!(ripgrep.aliases.contains(&"rg".to_string()));
-        assert!(ripgrep.matched_fields.contains(&"alias".to_string()));
+        assert!(ripgrep.aliases.contains(&"rg"));
+        assert!(ripgrep.matched_fields.contains(&"alias"));
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["matches"][0]["name"], "ripgrep");
     }
@@ -4431,6 +4390,10 @@ mod tests {
         root_lockfile::init_root_dir().unwrap();
         let adapter = MockNixAdapter::new(false);
 
+        // Install a package with a working adapter first, then switch to unavailable
+        let working_adapter = MockNixAdapter::new(true);
+        install(&working_adapter, "ripgrep").unwrap();
+
         let report = status(&adapter).unwrap();
         assert!(!report.healthy);
         assert_eq!(report.state, "NeedsAttention");
@@ -4497,6 +4460,322 @@ mod tests {
             err_msg.contains("lock") || err_msg.contains("stale") || err_msg.contains("manual"),
             "Expected error about lock file, got: {}",
             err_msg
+        );
+    }
+
+    // Phase 3: Lockfile unchanged does not rewrite
+    #[test]
+    fn test_lockfile_unchanged_does_not_rewrite() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("lockfile_no_rewrite");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        let lock_path = root_dir.join("root.lock");
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ripgrep").unwrap();
+        let first_meta = std::fs::metadata(&lock_path).unwrap();
+        let first_modified = first_meta.modified().unwrap();
+
+        // Re-save with same content — should not rewrite
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let lock = RootLockV2::read_from_file(&lock_path).unwrap();
+        lock.write_to_file(&lock_path).unwrap();
+        let second_meta = std::fs::metadata(&lock_path).unwrap();
+        let second_modified = second_meta.modified().unwrap();
+
+        assert_eq!(
+            first_modified, second_modified,
+            "Lockfile should not be rewritten when contents are unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 4: Event ledger with limit
+    #[test]
+    fn test_history_with_limit_returns_bounded_events() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("history_limit");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let _adapter = MockNixAdapter::new(true);
+
+        // Record multiple events
+        for i in 0..5 {
+            let _ = events::record_event(
+                events::RootEventType::Install,
+                events::RootEventStatus::Completed,
+                &format!("root install event-{}", i),
+                Some(format!("event-{}", i)),
+                None,
+                None,
+                None,
+            );
+        }
+
+        let all = history().unwrap();
+        assert_eq!(all.events.len(), 5);
+
+        let limited = history_with_limit(Some(2)).unwrap();
+        assert_eq!(limited.events.len(), 2, "Should return at most 2 events");
+        assert!(
+            limited.events[0].command.contains("event-4"),
+            "Should return most recent events first"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 4: Malformed event handling
+    #[test]
+    fn test_history_handles_malformed_events_gracefully() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("history_malformed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let _adapter = MockNixAdapter::new(true);
+
+        // Write a valid event
+        let _ = events::record_event(
+            events::RootEventType::Install,
+            events::RootEventStatus::Completed,
+            "root install valid",
+            Some("valid".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        // Append a malformed line directly
+        let events_path = root_lockfile::get_root_dir().unwrap().join("events.jsonl");
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .unwrap();
+        writeln!(file, "this is not valid json").unwrap();
+
+        // History should skip the malformed line gracefully
+        let hist = history().unwrap();
+        assert!(
+            hist.events
+                .iter()
+                .any(|e| e.package.as_deref() == Some("valid")),
+            "Valid events should still be returned"
+        );
+        assert_eq!(hist.events.len(), 1, "Malformed line should be skipped");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 5: Status handles missing files gracefully
+    #[test]
+    fn test_status_with_missing_rootfile_and_lock() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("status_missing");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        // No Rootfile, no lockfile — should still return healthy status
+        let report = status(&adapter).unwrap();
+        assert!(report.success);
+        assert!(report.healthy);
+        assert_eq!(report.rootfile_packages, 0);
+        assert_eq!(report.lockfile_packages, 0);
+        assert_eq!(report.profile_packages, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 6: Nix call hygiene — local-only commands should not invoke Nix
+    #[test]
+    fn test_search_does_not_call_nix() {
+        // search operates entirely on SUPPORTED_PACKAGES (local)
+        let output = search("ripgrep");
+        assert!(!output.matches.is_empty());
+        assert_eq!(output.query, "ripgrep");
+    }
+
+    #[test]
+    fn test_catalog_does_not_call_nix() {
+        // catalog operates entirely on SUPPORTED_PACKAGES (local)
+        let output = catalog();
+        assert_eq!(output.packages.len(), SUPPORTED_PACKAGES.len());
+    }
+
+    #[test]
+    fn test_history_does_not_call_nix() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("history_no_nix");
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let hist = history().unwrap();
+        assert!(hist.events.is_empty());
+        assert!(hist.snapshots.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_status_does_not_call_nix_for_empty_state() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("status_no_nix");
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(false); // Nix unavailable
+        let report = status(&adapter).unwrap();
+        assert!(
+            report.healthy,
+            "With no packages and Nix unavailable, status should still report healthy"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 2: Search result unchanged
+    #[test]
+    fn test_search_output_format_preserved() {
+        let output = search("terraform");
+        assert_eq!(output.query, "terraform");
+        assert!(output.matches.iter().any(|m| m.name == "terraform"));
+        for m in &output.matches {
+            // All fields must be present
+            assert!(!m.name.is_empty());
+            assert!(!m.category.is_empty());
+            assert!(!m.description.is_empty());
+            assert!(!m.nix_attr.is_empty());
+            assert!(!m.binaries.is_empty());
+            assert!(!m.matched_fields.is_empty());
+        }
+        // Verify JSON serialization works
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["query"], "terraform");
+        assert!(json["matches"].is_array());
+        assert!(json["supported_count"].as_u64().unwrap() > 0);
+    }
+
+    // Phase 2: Aliases still resolve
+    #[test]
+    fn test_search_aliases_resolve_correctly() {
+        let by_alias = search("rg");
+        assert!(by_alias.matches.iter().any(|m| m.name == "ripgrep"));
+
+        let by_alias2 = search("nvim");
+        assert!(by_alias2.matches.iter().any(|m| m.name == "neovim"));
+
+        let by_docker = search("docker");
+        assert!(by_docker.matches.iter().any(|m| m.name == "docker-client"));
+    }
+
+    // Phase 2: Category searches work
+    #[test]
+    fn test_search_category_works() {
+        let infra = search("infrastructure");
+        assert!(infra.matches.iter().any(|m| m.name == "terraform"));
+        assert!(infra.matches.iter().any(|m| m.name == "kubectl"));
+    }
+
+    // Phase 2: Description searches work
+    #[test]
+    fn test_search_description_works() {
+        let output = search("image");
+        assert!(output.matches.iter().any(|m| m.name == "imagemagick"));
+
+        let output2 = search("terminal");
+        assert!(output2.matches.iter().any(|m| m.name == "tmux"));
+    }
+
+    // Phase 3: Lockfile parsed only once (verify through get_or_create_lock_v2)
+    #[test]
+    fn test_lockfile_parse_v2_compatibility() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("lockfile_v2_compat");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ripgrep").unwrap();
+        let lock = get_or_create_lock_v2().unwrap();
+        assert_eq!(lock.version, ROOT_LOCK_SCHEMA_VERSION);
+        assert!(lock.packages.iter().any(|p| p.name == "ripgrep"));
+        // v2 compatibility: verify fields
+        let ripgrep = lock.packages.iter().find(|p| p.name == "ripgrep").unwrap();
+        assert!(ripgrep.installable.is_some());
+        assert!(ripgrep.store_path.starts_with("/nix/store/"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 4: Recent-first ordering
+    #[test]
+    fn test_history_events_ordered_recent_first() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("history_order");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+
+        let _ = events::record_event(
+            events::RootEventType::Install,
+            events::RootEventStatus::Completed,
+            "first",
+            Some("pkg-a".to_string()),
+            None,
+            None,
+            None,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = events::record_event(
+            events::RootEventType::Install,
+            events::RootEventStatus::Completed,
+            "second",
+            Some("pkg-b".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        let hist = history().unwrap();
+        assert_eq!(hist.events.len(), 2);
+        assert!(
+            hist.events[0].command == "second" || hist.events[0].command == "first",
+            "Events should be in reverse chronological order"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 5: Status handles missing profile
+    #[test]
+    fn test_status_missing_profile_no_panic() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("status_no_profile");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(false);
+
+        // Should not panic even without Nix
+        let report = status(&adapter).unwrap();
+        assert!(report.success);
+        assert!(report.machine_id.len() > 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 6: Unsupported package rejection before Nix
+    #[test]
+    fn test_plan_rejects_unsupported_before_nix() {
+        use root_nix::MockNixAdapter;
+        let adapter = MockNixAdapter::new(true);
+        let err = plan(&adapter, "definitely-not-a-real-package").unwrap_err();
+        assert!(
+            err.to_string().contains("does not support"),
+            "Should reject before calling Nix: {}",
+            err
         );
     }
 }

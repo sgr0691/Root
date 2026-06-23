@@ -102,6 +102,10 @@ pub fn append_event(event: &RootEvent) -> Result<()> {
 }
 
 pub fn read_events() -> Result<Vec<RootEvent>> {
+    read_events_with_limit(None)
+}
+
+pub fn read_events_with_limit(limit: Option<usize>) -> Result<Vec<RootEvent>> {
     let path = events_path()?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -121,6 +125,9 @@ pub fn read_events() -> Result<Vec<RootEvent>> {
         }
     }
     events.reverse();
+    if let Some(limit) = limit {
+        events.truncate(limit);
+    }
     Ok(events)
 }
 

@@ -58,7 +58,11 @@ enum Commands {
         pkg: Option<String>,
     },
     /// Show snapshot history
-    History,
+    History {
+        /// Show only the most recent N events
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
     /// Rollback to the previous state
     Rollback {
         #[arg(long)]
@@ -569,7 +573,7 @@ fn main() {
                 msg
             });
         }
-        Commands::History => match root_core::history() {
+        Commands::History { limit } => match root_core::history_with_limit(limit) {
             Ok(output) => {
                 if cli.json {
                     print_json(&output);

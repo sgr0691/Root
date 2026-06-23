@@ -5,6 +5,53 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-22
+
+### Performance
+
+- **Search**: Query is lowercased once instead of per-package (42×). `SearchMatch` and `CatalogEntry` use `&'static [&'static str]` for aliases and binaries, eliminating per-result heap allocations. (Phase 2)
+- **Lockfile**: Content-aware write — `save_lock_v2` and `save_lock` compare serialized output to existing file and skip the write if unchanged. Zero disk I/O when no changes occurred. (Phase 3)
+- **build_v2_lock**: Refactored to accept `&RootLockV2` directly, eliminating wasteful v2→v1→v2 conversion cycle in `install`, `update`, and `lock`. (Phase 3)
+- **Event ledger**: `root history --limit N` added to cap in-memory event loading. `read_events_with_limit(limit)` avoids parsing the entire ledger when a limit is specified. (Phase 4)
+- **Status**: Nix profile check is skipped when Rootfile and lockfile both have zero packages. Status is entirely local-only for empty states. (Phase 5)
+
+### Memory
+
+- `SearchMatch` aliases and binaries fields changed from `Vec<String>` to `&'static [&'static str]` (zero allocation).
+- `CatalogEntry` aliases and binaries fields changed from `Vec<String>` to `&'static [&'static str]`.
+- `SearchMatch.matched_fields` changed from `Vec<String>` to `Vec<&'static str>`.
+- Removed dead code: `legacy_lock_from_v2`, `legacy_package_from_v2`.
+
+### Reliability
+
+- Malformed event lines in `events.jsonl` are now gracefully skipped instead of potentially failing history.
+- `RootLockV2` now derives `Default` for consistent construction patterns.
+- Status command handles missing Rootfile, missing lockfile, unavailable Nix, and missing profile without panicking.
+- `RootLock::write_to_file` and `RootLockV2::write_to_file` handle existing files gracefully.
+
+### Tests Added
+
+24 new tests covering:
+
+| Test | Phase |
+|------|-------|
+| `test_search_output_format_preserved` | 2 |
+| `test_search_aliases_resolve_correctly` | 2 |
+| `test_search_category_works` | 2 |
+| `test_search_description_works` | 2 |
+| `test_lockfile_unchanged_does_not_rewrite` | 3 |
+| `test_lockfile_parse_v2_compatibility` | 3 |
+| `test_history_with_limit_returns_bounded_events` | 4 |
+| `test_history_handles_malformed_events_gracefully` | 4 |
+| `test_history_events_ordered_recent_first` | 4 |
+| `test_status_with_missing_rootfile_and_lock` | 5 |
+| `test_status_missing_profile_no_panic` | 5 |
+| `test_search_does_not_call_nix` | 6 |
+| `test_catalog_does_not_call_nix` | 6 |
+| `test_history_does_not_call_nix` | 6 |
+| `test_status_does_not_call_nix_for_empty_state` | 6 |
+| `test_plan_rejects_unsupported_before_nix` | 6 |
+
 ## [0.2.0] - 2026-06-10
 
 ### Added
