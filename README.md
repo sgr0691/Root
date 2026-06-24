@@ -1,4 +1,4 @@
-# Root v0.2.1
+# Root v0.2.2
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -7,6 +7,29 @@ undo it — without needing to learn Nix.
 
 [![CI](https://github.com/sgr0691/Root/actions/workflows/ci.yml/badge.svg)](https://github.com/sgr0691/Root/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+## What v0.2.2 Changed
+
+v0.2.2 is the **Nix Reliability & Recovery** release:
+
+- **Nix command audit** — Every Nix invocation catalogued with expected outputs,
+  exit codes, failure modes, and error-handling gaps. See
+  `Docs/Nix/V0_2_2_NIX_COMMAND_AUDIT.md`.
+- **Experimental feature detection** — `root doctor` probes for `nix-command`
+  and `flakes` support and explains how to enable them when missing.
+- **Profile generation validation** — After every mutation (install, update,
+  rollback, restore), Root validates that the Nix profile generation actually
+  changed and expected output paths are present.
+- **Store path hardening** — Derivation paths (`.drv`) are strictly separated
+  from output paths at every layer. Lockfile validation rejects `.drv` paths
+  in output fields before any mutation.
+- **Error normalization** — All Nix failure modes produce clear, actionable
+  messages without leaking raw Nix output. Covers missing Nix, disabled
+  features, missing attributes, network failures, profile conflicts, and more.
+- **Installer validation** — `root init --install-nix` now explains what will
+  happen, requires explicit confirmation, detects platform, and runs a
+  post-install probe.
+- **New docs** — Nix reliability notes and a dedicated smoke test document.
 
 ## What v0.2.1 Changed
 
@@ -340,7 +363,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.2.1)
+## Limitations (v0.2.2)
 
 - **Curated catalog only.** Root supports a curated catalog only — 42 packages
   across eleven categories. Arbitrary `root install <anything>` is not yet
@@ -371,7 +394,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.2.1 public
+The CLI includes additional commands that are **not part of the v0.2.2 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
