@@ -1,4 +1,4 @@
-# Root v0.2.2
+# Root v0.2.3
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -7,6 +7,28 @@ undo it — without needing to learn Nix.
 
 [![CI](https://github.com/sgr0691/Root/actions/workflows/ci.yml/badge.svg)](https://github.com/sgr0691/Root/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+## What v0.2.3 Changed
+
+v0.2.3 is the **Sandbox Hardening** release:
+
+- **Lifecycle validation** — Sandboxes follow a strict state machine: Created →
+  Running → Completed/Destroyed. Invalid state transitions are rejected.
+- **Cleanup guarantees** — Destroy always attempts cleanup; failed or interrupted
+  runs trigger cleanup; stale sandboxes are detectable.
+- **Resource limits** — Docker containers are created with memory (2 GB default)
+  and CPU (2 core) limits. Run `root sandbox create` with `--memory` and `--cpus`.
+- **Timeout handling** — `root sandbox run` accepts `--timeout` (default 300s).
+  Timed-out runs are terminated and recorded in the event ledger.
+- **Post-create and post-destroy validation** — Container existence, reachability,
+  and cleanup are verified after each operation.
+- **Event ledger integration** — Every sandbox action (create, run, timeout,
+  failure, destroy, cleanup) is recorded with timestamp, sandbox ID, and result.
+- **Error normalization** — Sandbox failures produce clear messages for Docker
+  unavailable, image pull failure, startup failure, timeout, resource limits,
+  permission denied, and cleanup failure.
+- **Sandbox audit** — Full subsystem audit at `Docs/Sandbox/V0_2_3_SANDBOX_AUDIT.md`.
+- **New docs** — Sandbox notes and a dedicated smoke test document.
 
 ## What v0.2.2 Changed
 
@@ -363,7 +385,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.2.2)
+## Limitations (v0.2.3)
 
 - **Curated catalog only.** Root supports a curated catalog only — 42 packages
   across eleven categories. Arbitrary `root install <anything>` is not yet
@@ -394,7 +416,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.2.2 public
+The CLI includes additional commands that are **not part of the v0.2.3 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
