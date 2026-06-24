@@ -10,7 +10,7 @@ use root_sandbox::SandboxProvider;
 use root_snapshot::{list_snapshot_summaries, list_snapshots, Snapshot, SnapshotSummary};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -859,21 +859,185 @@ pub(crate) fn enforce_policy(action: policy::PolicyAction, subject: Option<&str>
     }
 }
 
+/// Platform detected for Nix automatic installation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NixInstallPlatform {
+    MacOs,
+    Linux,
+}
+
+fn detect_nix_install_platform_inner(os: &str) -> Result<NixInstallPlatform> {
+    match os {
+        "macos" => Ok(NixInstallPlatform::MacOs),
+        "linux" => Ok(NixInstallPlatform::Linux),
+        other => Err(anyhow::anyhow!(
+            "Unsupported platform: '{}'. Nix installation via `root init --install-nix` \
+             is only supported on macOS and Linux.\n\n\
+             Please install Nix manually from:\n  https://nixos.org/download/\n\n\
+             After installing, run:\n  root doctor",
+            other
+        )),
+    }
+}
+
+/// Detect whether the current platform supports automatic Nix installation.
+pub fn detect_nix_install_platform() -> Result<NixInstallPlatform> {
+    detect_nix_install_platform_inner(std::env::consts::OS)
+}
+
+/// Build the shell command and arguments used to install Nix.
+pub fn build_nix_installer_command() -> (String, Vec<String>) {
+    let script = "curl -L https://nixos.org/nix/install | sh".to_string();
+    (
+        script.clone(),
+        vec!["sh".to_string(), "-c".to_string(), script],
+    )
+}
+
+/// Format the recovery message shown after a failed Nix installation.
+pub fn format_nix_installer_failure_message() -> String {
+    "Nix installation failed.\n\n\
+     You can install Nix manually:\n\
+       curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install\n\n\
+     Then run:\n  root doctor"
+        .to_string()
+}
+
+/// Format the message shown when running non-interactively without --yes.
+pub fn format_non_interactive_message() -> String {
+    "Nix installation requires confirmation, but this session is not interactive.\n\n\
+     To install Nix, run:\n  root init --install-nix --yes\n\n\
+     Or install Nix manually:\n\
+       curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install\n\n\
+     Then run:\n  root doctor"
+        .to_string()
+}
+
+/// Format the recovery message shown when the post-install `nix --version` probe fails.
+pub fn format_post_install_version_failure(stderr: &str) -> String {
+    let detail = if stderr.is_empty() {
+        "unknown error".to_string()
+    } else {
+        stderr.trim().to_string()
+    };
+    format!(
+        "Nix was installed but 'nix --version' failed: {}.\n\n\
+         Try restarting your shell, then run:\n  root doctor",
+        detail
+    )
+}
+
 /// Install Nix using the official multi-user installer.
-pub fn install_nix() -> Result<()> {
-    let status = std::process::Command::new("sh")
-        .args(["-c", "curl -L https://nixos.org/nix/install | sh"])
+///
+/// # Safety note
+///
+/// Checksum verification of the installer script is not currently implemented.
+/// The installer is downloaded via HTTPS, which provides transport-layer security,
+/// but the script contents are not independently verified before execution.
+/// This is future work — the script should be downloaded separately, its SHA-256
+/// checksum verified against a published value, and only then executed.
+///
+/// # Arguments
+///
+/// * `yes` — If `true`, skip the interactive confirmation prompt.
+pub fn install_nix(yes: bool) -> Result<()> {
+    let platform = detect_nix_install_platform()?;
+
+    // Explanation
+    println!("Root needs Nix to manage packages. Root will now download and run the");
+    println!("Nix installer from https://nixos.org/nix/install. This may modify your");
+    println!("shell profile and create /nix.");
+    match platform {
+        NixInstallPlatform::MacOs => {
+            println!("On macOS, the installer will set up a multi-user Nix installation");
+            println!("under /nix and may request administrator privileges.");
+        }
+        NixInstallPlatform::Linux => {
+            println!("On Linux, the installer will set up a multi-user Nix installation");
+            println!("under /nix and may request sudo access.");
+        }
+    }
+    println!();
+
+    // Confirmation
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(format_non_interactive_message());
+        }
+        print!("Continue? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+        if !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case("y")
+            && !trimmed.eq_ignore_ascii_case("yes")
+        {
+            anyhow::bail!("Nix installation cancelled by user.");
+        }
+    }
+
+    // Run installer
+    let (_, args) = build_nix_installer_command();
+    let program = &args[0];
+    let program_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+
+    let status = std::process::Command::new(program)
+        .args(&program_args)
         .status()
         .context("Failed to run Nix installer")?;
 
     if !status.success() {
-        Err(anyhow::anyhow!(
-            "Nix installer exited with code {:?}",
-            status.code()
-        ))
-    } else {
-        Ok(())
+        anyhow::bail!(format_nix_installer_failure_message());
     }
+
+    // Post-install probe
+    println!("\nVerifying Nix installation...");
+
+    let version_output = std::process::Command::new("nix")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Nix was installed but could not be executed: {}.\n\n\
+                 Try restarting your shell, or add Nix to your PATH:\n\
+                 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh\n\n\
+                 Then run:\n  root doctor",
+                e
+            )
+        })?;
+
+    if version_output.status.success() {
+        let version = String::from_utf8_lossy(&version_output.stdout)
+            .trim()
+            .to_string();
+        println!("✓ Nix {} installed and working", version);
+    } else {
+        let stderr = String::from_utf8_lossy(&version_output.stderr);
+        anyhow::bail!(format_post_install_version_failure(&stderr));
+    }
+
+    let features_output = std::process::Command::new("nix")
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "--version",
+        ])
+        .output();
+
+    match features_output {
+        Ok(output) if output.status.success() => {
+            println!("✓ Nix experimental features (nix-command, flakes) available");
+        }
+        _ => {
+            println!("⚠ Nix experimental features (nix-command, flakes) are not enabled.");
+            println!("  To enable them, add to ~/.config/nix/nix.conf:");
+            println!("    experimental-features = nix-command flakes");
+            println!("  Or edit /etc/nix/nix.conf to include the same line.");
+        }
+    }
+
+    Ok(())
 }
 
 pub fn init(adapter: &impl NixAdapter) -> Result<InitReport> {
@@ -935,8 +1099,13 @@ fn get_or_create_lock_v2() -> Result<RootLockV2> {
     let dir = get_root_dir()?;
     let path = dir.join("root.lock");
     if path.exists() {
-        RootLockV2::read_from_file(&path)
-            .or_else(|_| RootLock::read_from_file(&path).map(|lock| lock.to_v2()))
+        let lock = RootLockV2::read_from_file(&path)
+            .or_else(|_| RootLock::read_from_file(&path).map(|lock| lock.to_v2()))?;
+        root_lockfile::validate_store_paths(&lock).context(format!(
+            "Existing lockfile at {} failed validation",
+            path.display()
+        ))?;
+        Ok(lock)
     } else {
         Ok(get_or_create_lock()?.to_v2())
     }
@@ -1138,6 +1307,49 @@ fn verify_profile_contains_outputs(
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_mutation_result(
+    adapter: &impl NixAdapter,
+    before_generation: Option<u64>,
+    packages: &[&str],
+    binaries: &[&str],
+    store_paths: &[&str],
+) -> Result<()> {
+    let validation = adapter
+        .validate_profile_mutation(before_generation, packages, binaries, store_paths)
+        .map_err(|e| anyhow::anyhow!("Profile validation framework error: {}", e))?;
+
+    // Hard error: missing store paths or .drv paths in outputs
+    if !validation.expected_packages_present || !validation.drv_paths_found.is_empty() {
+        let mut msgs = Vec::new();
+        if !validation.missing_output_paths.is_empty() {
+            msgs.push(format!(
+                "Missing output paths: {}",
+                validation.missing_output_paths.join(", ")
+            ));
+        }
+        if !validation.drv_paths_found.is_empty() {
+            msgs.push(format!(
+                ".drv paths found in outputs: {}",
+                validation.drv_paths_found.join(", ")
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "Profile mutation validation failed: {}",
+            msgs.join("; ")
+        ));
+    }
+
+    // Hard error: generation did not change when it should have
+    if !validation.generation_changed && (!packages.is_empty() || !store_paths.is_empty()) {
+        return Err(anyhow::anyhow!(
+            "Profile generation did not change after mutation, \
+             which suggests the profile was not actually updated"
+        ));
+    }
+
     Ok(())
 }
 
@@ -1352,10 +1564,25 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
     let snapshot = Snapshot::create_from_v2(&format!("before install {}", canonical), &lock)?;
     let snapshot_id = snapshot.id.clone();
 
+    let before_gen = adapter
+        .profile_generation()
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     adapter
         .install_installable(canonical, &installable)
         .map_err(|e| anyhow::anyhow!(e))?;
     verify_profile_contains_outputs(adapter, &locked_package.store_paths)?;
+    validate_mutation_result(
+        adapter,
+        before_gen,
+        &[canonical],
+        spec.binaries,
+        &locked_package
+            .store_paths
+            .values()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+    )?;
 
     let mut rootfile = get_or_create_rootfile()?;
     rootfile
@@ -1371,6 +1598,8 @@ pub fn install(adapter: &impl NixAdapter, pkg: &str) -> Result<InstallReport> {
         .collect();
     v2_packages.push(locked_package.clone());
     let v2_lock = build_v2_lock(&lock, &flake, v2_packages)?;
+    root_lockfile::validate_store_paths(&v2_lock)
+        .context("Newly created lockfile failed validation after install")?;
     save_lock_v2(&v2_lock)?;
 
     let _ = events::record_event(
@@ -1512,11 +1741,25 @@ pub fn update(adapter: &impl NixAdapter, pkg: Option<&str>) -> Result<UpdateRepo
             .map(|old_package| locked_package_changed(old_package, &locked_package))
             .unwrap_or(true)
         {
+            let before_gen = adapter
+                .profile_generation()
+                .map_err(|e| anyhow::anyhow!(e))?;
             adapter.remove(canonical).map_err(|e| anyhow::anyhow!(e))?;
             adapter
                 .install_installable(canonical, &installable)
                 .map_err(|e| anyhow::anyhow!(e))?;
             verify_profile_contains_outputs(adapter, &locked_package.store_paths)?;
+            validate_mutation_result(
+                adapter,
+                before_gen,
+                &[canonical],
+                spec.binaries,
+                &locked_package
+                    .store_paths
+                    .values()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>(),
+            )?;
             updated.push(canonical.to_string());
         } else {
             unchanged.push(canonical.to_string());
@@ -1543,6 +1786,8 @@ pub fn update(adapter: &impl NixAdapter, pkg: Option<&str>) -> Result<UpdateRepo
             .map_err(|e| anyhow::anyhow!(e))?,
     };
     let new_lock = build_v2_lock(&current_lock, &flake, v2_packages)?;
+    root_lockfile::validate_store_paths(&new_lock)
+        .context("Newly created lockfile failed validation after update")?;
 
     let mut next_rootfile = rootfile;
     for package in &resolved_packages {
@@ -1667,6 +1912,10 @@ pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
     let last_snap = &snaps[0];
     let current_lock = get_or_create_lock_v2()?;
     let target_lock = last_snap.restored_lock();
+    root_lockfile::validate_store_paths(&target_lock).context(format!(
+        "Snapshot '{}' lock failed validation before rollback",
+        last_snap.id
+    ))?;
 
     // Step 1: Compute rollback plan
     let mut packages_to_remove = Vec::new();
@@ -1727,6 +1976,18 @@ pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
             .ok_or_else(|| {
                 anyhow::anyhow!("Snapshot package '{}' is missing lock metadata", pkg)
             })?;
+        let before_gen = adapter.profile_generation().map_err(|e| {
+            let _ = events::record_event(
+                events::RootEventType::Rollback,
+                events::RootEventStatus::Failed,
+                "root rollback --last",
+                None,
+                Some(pre_rollback_snap.id.clone()),
+                Some(last_snap.id.clone()),
+                Some(format!("Failed to check generation: {}", e)),
+            );
+            anyhow::anyhow!("Rollback failed to check generation: {}", e)
+        })?;
         let install_result = if let Some(installable) = locked_pkg.installable.as_deref() {
             adapter.install_installable(pkg, installable)
         } else {
@@ -1757,6 +2018,33 @@ pub fn rollback_last(adapter: &impl NixAdapter) -> Result<RollbackReport> {
                 Some(format!("Rollback verification failed for '{}': {}", pkg, e)),
             );
             anyhow::anyhow!("Rollback verification failed for '{}': {}", pkg, e)
+        })?;
+
+        let store_path_strs: Vec<&str> = locked_pkg
+            .store_paths
+            .values()
+            .map(|s| s.as_str())
+            .collect();
+        let spec = resolve_package(pkg);
+        let binaries = spec.map(|s| s.binaries).unwrap_or(&[]);
+        validate_mutation_result(
+            adapter,
+            before_gen,
+            &[pkg.as_str()],
+            binaries,
+            &store_path_strs,
+        )
+        .map_err(|e| {
+            let _ = events::record_event(
+                events::RootEventType::Rollback,
+                events::RootEventStatus::Failed,
+                "root rollback --last",
+                None,
+                Some(pre_rollback_snap.id.clone()),
+                Some(last_snap.id.clone()),
+                Some(format!("Rollback validation failed for '{}': {}", pkg, e)),
+            );
+            anyhow::anyhow!("Rollback validation failed for '{}': {}", pkg, e)
         })?;
     }
 
@@ -1942,6 +2230,8 @@ pub fn lock(adapter: &impl NixAdapter) -> Result<LockReport> {
             .map_err(|e| anyhow::anyhow!(e))?,
     };
     let new_lock = build_v2_lock(&current_v2_lock, &flake, v2_packages)?;
+    root_lockfile::validate_store_paths(&new_lock)
+        .context("Newly created lockfile failed validation after lock")?;
     save_lock_v2(&new_lock)?;
 
     Ok(LockReport {
@@ -1968,7 +2258,12 @@ pub struct SandboxCreateReport {
     pub name: String,
     pub image: String,
     pub status: String,
+    pub state: String,
     pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1979,6 +2274,12 @@ pub struct SandboxRunReport {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_attempted: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2266,6 +2567,27 @@ fn reconcile_profile_to_lock(
             continue;
         }
 
+        let before_gen = adapter.profile_generation().map_err(|e| {
+            let _ = events::record_event(
+                event_type.clone(),
+                events::RootEventStatus::Failed,
+                command,
+                Some(package.name.clone()),
+                Some(snapshot_id.clone()),
+                None,
+                Some(format!(
+                    "Failed to check generation before installing '{}': {}",
+                    package.name, e
+                )),
+            );
+            anyhow::anyhow!(
+                "{} failed to check generation for '{}': {}",
+                command,
+                package.name,
+                e
+            )
+        })?;
+
         let install_result = if let Some(installable) = package.installable.as_deref() {
             adapter.install_installable(&package.name, installable)
         } else {
@@ -2307,6 +2629,38 @@ fn reconcile_profile_to_lock(
                 e
             )
         })?;
+
+        let store_path_strs: Vec<&str> = package.store_paths.values().map(|s| s.as_str()).collect();
+        let spec = resolve_package(&package.name);
+        let binaries = spec.map(|s| s.binaries).unwrap_or(&[]);
+        validate_mutation_result(
+            adapter,
+            before_gen,
+            &[package.name.as_str()],
+            binaries,
+            &store_path_strs,
+        )
+        .map_err(|e| {
+            let _ = events::record_event(
+                event_type.clone(),
+                events::RootEventStatus::Failed,
+                command,
+                Some(package.name.clone()),
+                Some(snapshot_id.clone()),
+                None,
+                Some(format!(
+                    "Profile mutation validation failed for '{}': {}",
+                    package.name, e
+                )),
+            );
+            anyhow::anyhow!(
+                "{} mutation validation failed for '{}': {}",
+                command,
+                package.name,
+                e
+            )
+        })?;
+
         installed.push(package.name.clone());
     }
 
@@ -2378,6 +2732,7 @@ pub fn sync(adapter: &impl NixAdapter) -> Result<SyncReport> {
     }
 
     let lock = get_or_create_lock_v2()?;
+    root_lockfile::validate_store_paths(&lock).context("Lockfile failed validation before sync")?;
     let report = reconcile_profile_to_lock(
         adapter,
         &lock,
@@ -2469,6 +2824,10 @@ pub fn restore(adapter: &impl NixAdapter, lock_path: Option<&Path>) -> Result<Re
     };
     let target_lock = RootLockV2::read_from_file(&selected_lock_path)
         .or_else(|_| RootLock::read_from_file(&selected_lock_path).map(|lock| lock.to_v2()))?;
+    root_lockfile::validate_store_paths(&target_lock).context(format!(
+        "Lockfile at {} failed validation before restore",
+        selected_lock_path.display()
+    ))?;
     enforce_policy(policy::PolicyAction::Restore, None)?;
     for package in &target_lock.packages {
         enforce_policy(policy::PolicyAction::Restore, Some(&package.name))?;
@@ -2499,6 +2858,8 @@ pub fn sandbox_create(
     provider: &impl SandboxProvider,
     name: Option<&str>,
     image: Option<&str>,
+    memory: Option<&str>,
+    cpus: Option<&str>,
 ) -> Result<SandboxCreateReport> {
     root_lockfile::init_root_dir()?;
     let sandbox_name = name.unwrap_or("default");
@@ -2515,8 +2876,23 @@ pub fn sandbox_create(
     }
 
     let instance = provider
-        .create(sandbox_name, image)
+        .create(sandbox_name, image, memory, cpus)
         .map_err(|e| anyhow::anyhow!("Sandbox create failed: {}", e))?;
+
+    // Post-create validation
+    let exists = provider.check_exists(&instance.id).unwrap_or(false);
+    let reachable = provider.check_reachable(&instance.id).unwrap_or(false);
+
+    if !exists || !reachable {
+        let _ = provider.destroy(&instance.id);
+        return Err(anyhow::anyhow!(
+            "Sandbox '{}' was created but post-create validation failed \
+             (exists: {}, reachable: {}). The sandbox has been destroyed.",
+            sandbox_name,
+            exists,
+            reachable
+        ));
+    }
 
     let _ = events::record_event(
         events::RootEventType::Sandbox,
@@ -2536,8 +2912,11 @@ pub fn sandbox_create(
         id: instance.id,
         name: instance.name,
         image: instance.image,
-        status: instance.status,
+        status: format!("{:?}", instance.state),
+        state: format!("{:?}", instance.state),
         created_at: instance.created_at,
+        memory: instance.memory,
+        cpus: instance.cpus,
     })
 }
 
@@ -2545,33 +2924,84 @@ pub fn sandbox_run(
     provider: &impl SandboxProvider,
     id: &str,
     command: &[String],
+    timeout: Option<u64>,
 ) -> Result<SandboxRunReport> {
     root_lockfile::init_root_dir()?;
     enforce_policy(policy::PolicyAction::SandboxRun, Some(id))?;
 
+    let started_at = events::now_iso_for_event();
+    let start_instant = std::time::Instant::now();
+
     let cmd_str: Vec<&str> = command.iter().map(String::as_str).collect();
     let result = provider
-        .run_command(id, &cmd_str)
+        .run_command(id, &cmd_str, timeout)
         .map_err(|e| anyhow::anyhow!("Sandbox exec failed: {}", e))?;
 
-    let status = if result.exit_code == 0 {
-        events::RootEventStatus::Completed
+    let duration_ms = start_instant.elapsed().as_millis() as u64;
+    let finished_at = events::now_iso_for_event();
+    let is_timeout = result.exit_code == 124;
+
+    let (status, message) = if is_timeout {
+        (
+            events::RootEventStatus::Timeout,
+            format!(
+                "Command timed out in sandbox '{}' after {}ms",
+                id, duration_ms
+            ),
+        )
+    } else if result.exit_code == 0 {
+        (
+            events::RootEventStatus::Completed,
+            format!(
+                "Executed in sandbox '{}': exit code {}",
+                id, result.exit_code
+            ),
+        )
     } else {
-        events::RootEventStatus::Failed
+        (
+            events::RootEventStatus::Failed,
+            format!(
+                "Executed in sandbox '{}': exit code {}",
+                id, result.exit_code
+            ),
+        )
     };
 
-    let _ = events::record_event(
+    let mut cleanup_attempted = false;
+    if result.exit_code != 0 || is_timeout {
+        let _ = provider.destroy(id);
+        cleanup_attempted = true;
+        let cleanup_msg = if is_timeout {
+            format!("Cleanup attempted after timeout for sandbox '{}'", id)
+        } else {
+            format!("Cleanup attempted after failed run for sandbox '{}'", id)
+        };
+        let _ = events::record_event(
+            events::RootEventType::Sandbox,
+            events::RootEventStatus::Completed,
+            &format!("root sandbox cleanup {}", id),
+            None,
+            None,
+            None,
+            Some(cleanup_msg),
+        );
+    }
+
+    let mut event = events::create_event(
         events::RootEventType::Sandbox,
         status,
         &format!("root sandbox run {}", id),
         None,
         None,
         None,
-        Some(format!(
-            "Executed in sandbox '{}': exit code {}",
-            id, result.exit_code
-        )),
+        Some(message),
     );
+    event.sandbox_id = Some(id.to_string());
+    event.exit_code = Some(result.exit_code);
+    event.started_at = Some(started_at);
+    event.finished_at = Some(finished_at);
+    event.duration_ms = Some(duration_ms);
+    let _ = events::append_event(&event);
 
     Ok(SandboxRunReport {
         success: result.exit_code == 0,
@@ -2580,6 +3010,9 @@ pub fn sandbox_run(
         exit_code: result.exit_code,
         stdout: result.stdout,
         stderr: result.stderr,
+        duration_ms: Some(duration_ms),
+        timed_out: Some(is_timeout),
+        cleanup_attempted: Some(cleanup_attempted),
     })
 }
 
@@ -2598,24 +3031,60 @@ pub fn sandbox_destroy(provider: &impl SandboxProvider, id: &str) -> Result<Sand
     root_lockfile::init_root_dir()?;
     enforce_policy(policy::PolicyAction::SandboxDestroy, Some(id))?;
 
-    provider
-        .destroy(id)
-        .map_err(|e| anyhow::anyhow!("Sandbox destroy failed: {}", e))?;
+    let result = provider.destroy(id);
 
-    let _ = events::record_event(
-        events::RootEventType::Sandbox,
-        events::RootEventStatus::Completed,
-        &format!("root sandbox destroy {}", id),
-        None,
-        None,
-        None,
-        Some(format!("Destroyed sandbox '{}'", id)),
-    );
+    // Post-destroy check: verify the container is actually gone
+    let still_exists = provider.check_exists(id).unwrap_or(false);
+    let warning = if still_exists {
+        let msg = format!("Sandbox '{}' may still exist after destroy attempt", id);
+        let _ = events::record_event(
+            events::RootEventType::Sandbox,
+            events::RootEventStatus::Failed,
+            &format!("root sandbox destroy {}", id),
+            None,
+            None,
+            None,
+            Some(msg.clone()),
+        );
+        Some(msg)
+    } else {
+        None
+    };
 
-    Ok(SandboxDestroyReport {
-        success: true,
-        id: id.to_string(),
-    })
+    match result {
+        Ok(()) => {
+            let _ = events::record_event(
+                events::RootEventType::Sandbox,
+                events::RootEventStatus::Completed,
+                &format!("root sandbox destroy {}", id),
+                None,
+                None,
+                None,
+                Some(format!("Destroyed sandbox '{}'", id)),
+            );
+            Ok(SandboxDestroyReport {
+                success: true,
+                id: id.to_string(),
+            })
+        }
+        Err(e) => {
+            let msg = if let Some(ref w) = warning {
+                format!("{}. {}", e, w)
+            } else {
+                format!("{}", e)
+            };
+            let _ = events::record_event(
+                events::RootEventType::Sandbox,
+                events::RootEventStatus::Failed,
+                &format!("root sandbox destroy {}", id),
+                None,
+                None,
+                None,
+                Some(msg.clone()),
+            );
+            Err(anyhow::anyhow!("Sandbox destroy failed: {}", msg))
+        }
+    }
 }
 
 pub fn status(adapter: &impl root_nix::NixAdapter) -> Result<StatusReport> {
@@ -4337,7 +4806,7 @@ mod tests {
         .unwrap();
 
         let provider = root_sandbox::MockSandboxProvider::new(true);
-        let error = sandbox_create(&provider, Some("blocked"), None).unwrap_err();
+        let error = sandbox_create(&provider, Some("blocked"), None, None, None).unwrap_err();
         assert!(error.to_string().contains("Policy denied sandbox-create"));
         assert!(provider.list().unwrap().is_empty());
 
@@ -4777,5 +5246,473 @@ mod tests {
             "Should reject before calling Nix: {}",
             err
         );
+    }
+
+    // ── Phase 4: Store Path Validation ────────────────────────────────────
+
+    fn make_invalid_lockfile(lock_dir: &std::path::Path) {
+        // Write a lockfile where an output store_path ends in .drv
+        let mut pkg = root_lockfile::LockedPackageV2 {
+            name: "ffmpeg".into(),
+            requested: "ffmpeg".into(),
+            version: "8.1".into(),
+            attribute: "ffmpeg".into(),
+            store_path: "/nix/store/abc-ffmpeg-8.1".into(),
+            binaries: vec!["ffmpeg".into()],
+            installable: Some("nixpkgs#ffmpeg".into()),
+            drv_path: Some("/nix/store/drv-ffmpeg-8.1.drv".into()),
+            ..Default::default()
+        };
+        pkg.outputs.insert(
+            "out".into(),
+            root_lockfile::LockedPackageOutput {
+                store_path: "/nix/store/abc-ffmpeg-8.1.drv".into(),
+                content_hash: None,
+                nar_hash: None,
+                references: vec![],
+            },
+        );
+        pkg.store_paths
+            .insert("out".into(), "/nix/store/abc-ffmpeg-8.1.drv".into());
+
+        let lock = RootLockV2 {
+            platform: root_lockfile::detect_platform().unwrap_or_else(|_| "aarch64-darwin".into()),
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        lock.write_to_file(&lock_dir.join("root.lock")).unwrap();
+    }
+
+    fn make_invalid_snapshot(snapshot_dir: &std::path::Path, snapshot_id: &str) {
+        let mut pkg = root_lockfile::LockedPackageV2 {
+            name: "ffmpeg".into(),
+            requested: "ffmpeg".into(),
+            version: "8.1".into(),
+            attribute: "ffmpeg".into(),
+            store_path: "/nix/store/abc-ffmpeg-8.1".into(),
+            binaries: vec!["ffmpeg".into()],
+            installable: Some("nixpkgs#ffmpeg".into()),
+            drv_path: Some("/nix/store/drv-ffmpeg-8.1.drv".into()),
+            ..Default::default()
+        };
+        pkg.outputs.insert(
+            "out".into(),
+            root_lockfile::LockedPackageOutput {
+                store_path: "/nix/store/abc-ffmpeg-8.1.drv".into(),
+                content_hash: None,
+                nar_hash: None,
+                references: vec![],
+            },
+        );
+        pkg.store_paths
+            .insert("out".into(), "/nix/store/abc-ffmpeg-8.1.drv".into());
+
+        let lock = RootLockV2 {
+            version: ROOT_LOCK_SCHEMA_VERSION,
+            platform: root_lockfile::detect_platform().unwrap_or_else(|_| "aarch64-darwin".into()),
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+
+        let snapshot = root_snapshot::Snapshot {
+            id: snapshot_id.to_string(),
+            created_at: chrono::Utc::now(),
+            reason: "test invalid snapshot".into(),
+            schema_version: ROOT_LOCK_SCHEMA_VERSION,
+            package_count: 1,
+            lock_content_hash: root_lockfile::compute_sha256(&serde_json::to_vec(&lock).unwrap()),
+            lock: lock.clone(),
+            packages: vec![],
+        };
+        let content = serde_json::to_string_pretty(&snapshot).unwrap();
+        let snap_path = snapshot_dir.join(format!("{}.json", snapshot_id));
+        std::fs::write(&snap_path, content).unwrap();
+    }
+
+    #[test]
+    fn test_restore_rejects_invalid_lockfile_before_mutation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("restore_rejects_invalid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        make_invalid_lockfile(&tmp);
+
+        let lock_path = tmp.join("root.lock");
+        let err = restore(&adapter, Some(&lock_path)).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("failed validation before restore"),
+            "Expected store path validation error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_rollback_rejects_invalid_snapshot_before_mutation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("rollback_rejects_invalid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let root_dir = root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        // Install a valid package first so there's something to roll back
+        install(&adapter, "ffmpeg").unwrap();
+
+        // Manually inject an invalid snapshot
+        let snapshot_dir = root_dir.join("snapshots");
+        let snapshot_id = "snap_invalid_00000000_000000_000000";
+        make_invalid_snapshot(&snapshot_dir, snapshot_id);
+
+        let err = rollback_last(&adapter).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("derivation path where an output path was expected")
+                || err_msg.contains("failed validation"),
+            "Expected store path validation error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_sync_rejects_invalid_lockfile() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("sync_rejects_invalid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        // Install a package via mock to get valid profile state
+        adapter.install("ffmpeg").unwrap();
+
+        // Write an invalid lockfile
+        make_invalid_lockfile(&tmp);
+
+        let err = sync(&adapter).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("derivation path") || err_msg.contains("failed validation"),
+            "Expected store path validation error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_lock_rejects_invalid_lockfile_on_read() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("lock_rejects_invalid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        root_lockfile::init_root_dir().unwrap();
+        let adapter = MockNixAdapter::new(true);
+
+        // Install a valid package to create initial state
+        adapter.install("ripgrep").unwrap();
+        let mut rf = get_or_create_rootfile().unwrap();
+        rf.packages.insert("ripgrep".into(), "latest".into());
+        save_rootfile(&rf).unwrap();
+        lock(&adapter).unwrap();
+
+        // Now replace with invalid lockfile
+        make_invalid_lockfile(&tmp);
+
+        // Reading the lockfile should fail validation
+        let err = get_or_create_lock_v2().unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("validation"),
+            "Expected validation error, got: {}",
+            err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Phase 6: Installer validation
+
+    #[test]
+    fn test_detect_platform_macos() {
+        assert_eq!(
+            detect_nix_install_platform_inner("macos").unwrap(),
+            NixInstallPlatform::MacOs
+        );
+    }
+
+    #[test]
+    fn test_detect_platform_linux() {
+        assert_eq!(
+            detect_nix_install_platform_inner("linux").unwrap(),
+            NixInstallPlatform::Linux
+        );
+    }
+
+    #[test]
+    fn test_detect_platform_unsupported() {
+        let err = detect_nix_install_platform_inner("windows").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unsupported platform") && msg.contains("windows"),
+            "Expected unsupported platform error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_detect_platform_unsupported_other() {
+        let err = detect_nix_install_platform_inner("freebsd").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unsupported platform") && msg.contains("freebsd"),
+            "Expected unsupported platform error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_build_nix_installer_command_structure() {
+        let (script, args) = build_nix_installer_command();
+        assert!(
+            script.contains("curl") && script.contains("nixos.org"),
+            "Script should contain curl command with nixos.org URL"
+        );
+        assert_eq!(args[0], "sh");
+        assert_eq!(args[1], "-c");
+        assert_eq!(args[2], script);
+    }
+
+    #[test]
+    fn test_build_nix_installer_command_uses_https() {
+        let (script, _) = build_nix_installer_command();
+        assert!(
+            script.contains("https://nixos.org/nix/install"),
+            "Installer URL should use HTTPS"
+        );
+        assert!(
+            !script.contains("http://"),
+            "Installer URL should not use plain HTTP"
+        );
+    }
+
+    #[test]
+    fn test_installer_failure_message_format() {
+        let msg = format_nix_installer_failure_message();
+        assert!(msg.contains("Nix installation failed"));
+        assert!(msg.contains("install Nix manually"));
+        assert!(msg.contains("install.determinate.systems"));
+        assert!(msg.contains("root doctor"));
+    }
+
+    #[test]
+    fn test_installer_failure_message_includes_curl_command() {
+        let msg = format_nix_installer_failure_message();
+        assert!(msg.contains("curl --proto '=https' --tlsv1.2 -sSf -L"));
+        assert!(msg.contains("install.determinate.systems/nix"));
+    }
+
+    #[test]
+    fn test_non_interactive_message_format() {
+        let msg = format_non_interactive_message();
+        assert!(msg.contains("not interactive"));
+        assert!(msg.contains("root init --install-nix --yes"));
+        assert!(msg.contains("root doctor"));
+    }
+
+    #[test]
+    fn test_post_install_version_failure_format() {
+        let msg = format_post_install_version_failure("nix: command not found");
+        assert!(msg.contains("nix --version' failed"));
+        assert!(msg.contains("nix: command not found"));
+        assert!(msg.contains("restarting your shell"));
+        assert!(msg.contains("root doctor"));
+    }
+
+    #[test]
+    fn test_post_install_version_failure_empty_stderr() {
+        let msg = format_post_install_version_failure("");
+        assert!(msg.contains("nix --version' failed"));
+        assert!(msg.contains("unknown error"));
+        assert!(msg.contains("root doctor"));
+    }
+
+    #[test]
+    fn test_platform_detect_returns_os_on_this_machine() {
+        // This test verifies that the platform detection function works
+        // on whatever OS this test is run on (macOS or Linux).
+        // It should not fail on supported platforms.
+        if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+            let result = detect_nix_install_platform();
+            assert!(result.is_ok(), "Platform should be detected on macOS/Linux");
+        }
+    }
+
+    // ─── Phase 3: Profile Validation Integration Tests ────────────────────
+
+    #[test]
+    fn test_install_validates_profile_generation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_validate_gen");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        install(&adapter, "ripgrep").unwrap();
+
+        let gen = adapter.profile_generation().unwrap();
+        assert_eq!(
+            gen,
+            Some(2),
+            "Generation should have incremented after install"
+        );
+    }
+
+    #[test]
+    fn test_install_fails_cleanly_when_profile_missing_path() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("install_fail_missing_path");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        // Override profile list to return JSON that doesn't include the
+        // expected store path for ripgrep — simulating a failed install.
+        let bad_json = r#"[{"index":0,"attrPath":"other-pkg","originalUrl":"flake:nixpkgs","installable":"nixpkgs#other-pkg","storePaths":["/nix/store/abc-other-pkg"]}]"#.to_string();
+        adapter.set_profile_list_json_override(Some(bad_json));
+
+        let err = install(&adapter, "ripgrep").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("validation") || msg.contains("store path") || msg.contains("profile"),
+            "Expected validation error mentioning profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_update_validates_profile() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("update_validates_profile");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        // Install via raw adapter + set up rootfile
+        adapter.install("ripgrep").unwrap();
+        let mut lock = get_or_create_lock().unwrap();
+        lock.packages.push(LockedPackage {
+            name: "ripgrep".into(),
+            requested: "ripgrep".into(),
+            version: "latest".into(),
+            attribute: "ripgrep".into(),
+            store_path: root_lockfile::derive_store_path("ripgrep", "latest"),
+            binaries: vec!["rg".into()],
+        });
+        save_lock(&lock).unwrap();
+        let mut rootfile = get_or_create_rootfile().unwrap();
+        rootfile.packages.insert("ripgrep".into(), "latest".into());
+        save_rootfile(&rootfile).unwrap();
+
+        let report = update(&adapter, Some("ripgrep")).unwrap();
+        assert!(report.success);
+        assert!(report.updated.contains(&"ripgrep".to_string()));
+    }
+
+    #[test]
+    fn test_rollback_validates_profile() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("rollback_validates_profile");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        // Set up initial package
+        adapter.install("ripgrep").unwrap();
+        let mut lock = get_or_create_lock().unwrap();
+        lock.packages.push(LockedPackage {
+            name: "ripgrep".into(),
+            requested: "ripgrep".into(),
+            version: "latest".into(),
+            attribute: "ripgrep".into(),
+            store_path: root_lockfile::derive_store_path("ripgrep", "latest"),
+            binaries: vec!["rg".into()],
+        });
+        save_lock(&lock).unwrap();
+        let mut rootfile = get_or_create_rootfile().unwrap();
+        rootfile.packages.insert("ripgrep".into(), "latest".into());
+        save_rootfile(&rootfile).unwrap();
+
+        // Install another package to create a rollback point
+        install(&adapter, "ffmpeg").unwrap();
+
+        // Reset profile JSON override to ensure normal behavior
+        adapter.set_profile_list_json_override(None);
+
+        let report = rollback_last(&adapter).unwrap();
+        assert!(report.success);
+        assert!(report.packages_removed.contains(&"ffmpeg".to_string()));
+    }
+
+    #[test]
+    fn test_validate_mutation_reports_generation_unchanged_error() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let tmp = test_tmp_dir("validate_gen_unchanged");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("ROOT_DIR", &tmp);
+        let _ = root_lockfile::init_root_dir();
+        let adapter = MockNixAdapter::new(true);
+
+        // Manually configure: don't do any mutation so generation doesn't change
+        let before = adapter.profile_generation().unwrap();
+
+        // Set up a mock profile that already has the path
+        let mock_path = {
+            let token = format!("{:032x}", {
+                "ripgrep".bytes().fold(0xcbf29ce484222325u64, |h, b| {
+                    (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+                })
+            });
+            let n = "ripgrep".bytes().fold(0xcbf29ce484222325u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+            });
+            format!("/nix/store/{}-ripgrep-0.1.{}", token, n % 1000)
+        };
+        adapter.set_profile_list_json_override(Some(
+            format!(
+                r#"[{{"index":0,"attrPath":"ripgrep","installable":"nixpkgs#ripgrep","storePaths":["{}"]}}]"#,
+                mock_path
+            )
+        ));
+
+        // validate_mutation_result should detect generation didn't change
+        let result =
+            validate_mutation_result(&adapter, before, &["ripgrep"], &["rg"], &[&mock_path]);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("generation did not change"),
+            "Expected generation-not-changed error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_mutation_empty_profile_handled() {
+        let adapter = MockNixAdapter::new(false);
+        let result = validate_mutation_result(&adapter, None, &[], &[], &[]);
+        assert!(result.is_ok(), "Empty state should not fail: {:?}", result);
     }
 }

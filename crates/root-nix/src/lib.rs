@@ -5,14 +5,96 @@ use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum NixError {
-    #[error("Nix is not installed or not available on PATH")]
+    #[error(
+        "Nix is not installed or not found on PATH.\n\n\
+         Install Nix using the official installer:\n\
+           curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install\n\n\
+         Then run:\n  root doctor"
+    )]
     NotInstalled,
-    #[error("This package is not available for your Mac architecture.\nTry `root search {0}` to find alternatives.")]
+    #[error("The package '{0}' is not available for your system architecture.")]
     PlatformMissing(String),
-    #[error("Package '{0}' not found in nixpkgs")]
+    #[error(
+        "Package '{0}' was not found in the nixpkgs repository.\n\n\
+         The package may have been removed or renamed."
+    )]
     NotFound(String),
-    #[error("Nix command failed: {0}")]
+    #[error(
+        "Nix is installed but the 'flakes' experimental feature is not enabled.\n\n\
+         Root requires flakes to resolve packages.\n\n\
+         Enable it in ~/.config/nix/nix.conf:\n  experimental-features = nix-command flakes"
+    )]
+    FlakesDisabled,
+    #[error(
+        "Nix is installed but the 'nix-command' experimental feature is not enabled.\n\n\
+         Root requires the nix-command feature to manage profiles.\n\n\
+         Enable it in ~/.config/nix/nix.conf:\n  experimental-features = nix-command flakes"
+    )]
+    NixCommandDisabled,
+    #[error(
+        "Could not reach the Nix package repository (nixpkgs).\n\n\
+         Check your internet connection and try again."
+    )]
+    NixpkgsUnavailable,
+    #[error(
+        "Package '{0}' was not found in the nixpkgs repository.\n\n\
+         The package may have been removed or renamed."
+    )]
+    AttributeMissing(String),
+    #[error(
+        "The Nix profile is currently locked by another process.\n\n\
+         Wait a moment and try again."
+    )]
+    ProfileLocked,
+    #[error(
+        "Nix could not update the profile due to a symlink conflict.\n\n\
+         This usually happens when the profile path was pre-created as a directory.\n\
+         Run 'root doctor' to fix this."
+    )]
+    ProfileSymlinkConflict,
+    #[error(
+        "Root does not have permission to write to the Nix profile.\n\n\
+         You may need to run with appropriate permissions or check\n\
+         ~/.root/profiles/default ownership."
+    )]
+    PermissionDenied,
+    #[error(
+        "The Nix store path for '{0}' has not been built yet.\n\n\
+         Run 'root install {0}' again."
+    )]
+    StorePathNotRealized(String),
+    #[error(
+        "Internal error: a derivation path (.drv) was found where an output path was expected.\n\n\
+         This indicates a lockfile or snapshot is corrupted.\n\
+         Run 'root doctor' for recovery steps."
+    )]
+    DerivationPathAsOutput(String),
+    #[error(
+        "Nix returned an unexpected error.\n\n\
+         Run with the --json flag to see technical details."
+    )]
     Generic(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl NixError {
+    pub fn raw_stderr(&self) -> Option<&str> {
+        match self {
+            NixError::Generic(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExperimentalFeatureStatus {
+    AllAvailable,
+    NixCommandMissing,
+    FlakesMissing,
+    BothMissing,
+    NixpkgsResolutionFailed,
+    NixNotAvailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +160,25 @@ pub struct LockedPackageResolution {
     pub path_info: Vec<PathInfo>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinaryCheck {
+    pub name: String,
+    pub exists: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileValidation {
+    pub profile_exists: bool,
+    pub generation_before: Option<u64>,
+    pub generation_after: Option<u64>,
+    pub generation_changed: bool,
+    pub expected_packages_present: bool,
+    pub missing_output_paths: Vec<String>,
+    pub binaries: Vec<BinaryCheck>,
+    pub drv_paths_found: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 pub trait NixAdapter {
     fn check_availability(&self) -> Result<bool, NixError>;
     fn search(&self, package: &str) -> Result<String, NixError>;
@@ -103,6 +204,116 @@ pub trait NixAdapter {
         pinned_installable: Option<&str>,
     ) -> Result<DerivationInfo, NixError>;
     fn path_info(&self, path_or_installable: &str) -> Result<PathInfo, NixError>;
+    fn probe_experimental_features(&self) -> Result<ExperimentalFeatureStatus, NixError>;
+
+    fn profile_generation(&self) -> Result<Option<u64>, NixError>;
+    fn profile_exists(&self) -> bool;
+    fn profile_path(&self) -> Result<PathBuf, NixError>;
+
+    fn validate_profile_mutation(
+        &self,
+        before_generation: Option<u64>,
+        expected_packages: &[&str],
+        expected_binaries: &[&str],
+        expected_store_paths: &[&str],
+    ) -> Result<ProfileValidation, NixError> {
+        let mut validation = ProfileValidation {
+            profile_exists: self.profile_exists(),
+            generation_before: before_generation,
+            generation_after: None,
+            generation_changed: false,
+            expected_packages_present: true,
+            missing_output_paths: Vec::new(),
+            binaries: Vec::new(),
+            drv_paths_found: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        match self.profile_generation() {
+            Ok(Some(gen)) => {
+                validation.generation_after = Some(gen);
+                validation.generation_changed = before_generation
+                    .map(|before| before != gen)
+                    .unwrap_or(true);
+            }
+            Ok(None) => {
+                validation.generation_changed = false;
+            }
+            Err(e) => {
+                validation
+                    .errors
+                    .push(format!("Failed to check profile generation: {}", e));
+            }
+        }
+
+        if !expected_packages.is_empty() || !expected_store_paths.is_empty() {
+            match self.profile_list_json() {
+                Ok(profile_json) => {
+                    for package in expected_packages {
+                        if !profile_json.contains(&format!("\"{}\"", json_escape(package))) {
+                            validation.expected_packages_present = false;
+                            validation.errors.push(format!(
+                                "Profile does not contain expected package: {}",
+                                package
+                            ));
+                        }
+                    }
+                    for path in expected_store_paths {
+                        if path.ends_with(".drv") {
+                            validation.drv_paths_found.push(path.to_string());
+                            validation
+                                .errors
+                                .push(format!("Expected output path is a .drv path: {}", path));
+                            validation.expected_packages_present = false;
+                        } else if !profile_json.contains(path) {
+                            validation.expected_packages_present = false;
+                            validation.missing_output_paths.push(path.to_string());
+                            validation.errors.push(format!(
+                                "Profile does not contain expected store path: {}",
+                                path
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    validation
+                        .errors
+                        .push(format!("Failed to list profile: {}", e));
+                }
+            }
+        }
+
+        if !expected_binaries.is_empty() {
+            match self.profile_path() {
+                Ok(profile_path) => {
+                    let bin_dir = profile_path.join("bin");
+                    if bin_dir.exists() {
+                        for binary in expected_binaries {
+                            let bin_path = bin_dir.join(binary);
+                            let exists = bin_path.exists();
+                            validation.binaries.push(BinaryCheck {
+                                name: binary.to_string(),
+                                exists,
+                            });
+                            if !exists {
+                                validation.errors.push(format!(
+                                    "Expected binary '{}' not found in profile bin dir",
+                                    binary
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    validation
+                        .errors
+                        .push(format!("Cannot determine profile path: {}", e));
+                }
+            }
+        }
+
+        Ok(validation)
+    }
 
     fn resolve_locked_package(
         &self,
@@ -154,7 +365,7 @@ impl RealNixAdapter {
     fn profile_path_str(&self) -> Result<&str, NixError> {
         self.profile_path
             .to_str()
-            .ok_or_else(|| NixError::Generic("Profile path is not valid UTF-8".to_string()))
+            .ok_or_else(|| NixError::Internal("Profile path is not valid UTF-8".to_string()))
     }
 
     fn run_command(
@@ -181,33 +392,94 @@ impl RealNixAdapter {
     }
 
     fn normalize_error(stderr: &str, package_context: &str) -> Result<String, NixError> {
-        if stderr.contains("attribute") && stderr.contains("missing from derivation") {
-            // E.g. "attribute 'aarch64-darwin' missing from derivation"
+        let trimmed = stderr.trim();
+        let lower = stderr.to_lowercase();
+
+        // Unsupported platform (e.g. "attribute 'aarch64-darwin' missing from derivation")
+        if lower.contains("attribute") && lower.contains("missing from derivation") {
             return Err(NixError::PlatformMissing(package_context.to_string()));
         }
-        if stderr.contains("error: no outputs found") {
+
+        // Package not found (e.g. "error: no outputs found")
+        if lower.contains("error: no outputs found") {
             return Err(NixError::NotFound(package_context.to_string()));
         }
-        if stderr.contains("experimental feature") && stderr.contains("is not enabled") {
-            return Err(NixError::Generic(
-                "Nix experimental features 'nix-command' and 'flakes' are required.\n\
-                 To enable them, add this to ~/.config/nix/nix.conf:\n\
-                 experimental-features = nix-command flakes\n\n\
-                 Or edit /etc/nix/nix.conf to include the same line."
-                    .to_string(),
+
+        // Flakes disabled
+        if lower.contains("experimental feature")
+            && lower.contains("flakes")
+            && lower.contains("is not enabled")
+        {
+            return Err(NixError::FlakesDisabled);
+        }
+
+        // nix-command disabled
+        if lower.contains("experimental feature")
+            && lower.contains("nix-command")
+            && lower.contains("is not enabled")
+        {
+            return Err(NixError::NixCommandDisabled);
+        }
+
+        // Network / nixpkgs unreachable
+        if lower.contains("cannot connect")
+            || lower.contains("could not resolve")
+            || lower.contains("connection refused")
+            || lower.contains("temporary failure in name resolution")
+            || lower.contains("network is unreachable")
+            || (lower.contains("network") && lower.contains("unreachable"))
+        {
+            return Err(NixError::NixpkgsUnavailable);
+        }
+
+        // Attribute not found in nixpkgs (different from platform-missing attribute above)
+        if lower.contains("attribute")
+            && !lower.contains("missing from derivation")
+            && (lower.contains("not found")
+                || lower.contains("does not exist")
+                || lower.contains("in selection path"))
+        {
+            return Err(NixError::AttributeMissing(package_context.to_string()));
+        }
+
+        // Profile locked / busy
+        if (lower.contains("lock") || lower.contains("busy"))
+            && (lower.contains("profile")
+                || lower.contains("lock file")
+                || lower.contains("acquiring"))
+        {
+            return Err(NixError::ProfileLocked);
+        }
+
+        // Profile symlink conflict
+        if (lower.contains("reading symbolic link") || lower.contains("invalid argument"))
+            || (lower.contains("symlink") && lower.contains("conflict"))
+        {
+            return Err(NixError::ProfileSymlinkConflict);
+        }
+
+        // Permission denied
+        if lower.contains("permission denied")
+            || lower.contains("not writable")
+            || (lower.contains("could not open") && lower.contains("profile"))
+        {
+            return Err(NixError::PermissionDenied);
+        }
+
+        // Store path not realized (not built yet)
+        if lower.contains("store path") && lower.contains("does not exist") {
+            return Err(NixError::StorePathNotRealized(package_context.to_string()));
+        }
+
+        // Derivation path mixed with output path
+        if lower.contains(".drv") && lower.contains("output path") {
+            return Err(NixError::DerivationPathAsOutput(
+                package_context.to_string(),
             ));
         }
-        if stderr.contains("error: reading symbolic link") || stderr.contains("Invalid argument") {
-            return Err(NixError::Generic(
-                "Nix profile path issue detected.\n\
-                 This can happen when Root's profile path (~/.root/profiles/default)\n\
-                 conflicts with Nix's symlink management.\n\n\
-                 Run:  root doctor\n\
-                 To repair, try:  rm -rf ~/.root/profiles/default && root init"
-                    .to_string(),
-            ));
-        }
-        Err(NixError::Generic(stderr.trim().to_string()))
+
+        // Fallback: store raw stderr for --json mode
+        Err(NixError::Generic(trimmed.to_string()))
     }
 
     fn eval_json_attr(
@@ -218,18 +490,77 @@ impl RealNixAdapter {
         let expr = format!("{}.{}", installable, attr);
         match Self::run_command(&["eval", "--json", &expr], &[], Some(package)) {
             Ok(stdout) => Ok(json_string_value(stdout.trim())),
-            Err(NixError::Generic(_)) => Ok(None),
+            Err(NixError::Generic(_) | NixError::AttributeMissing(_)) => Ok(None),
             Err(err) => Err(err),
         }
     }
 }
 
 impl NixAdapter for RealNixAdapter {
+    fn profile_generation(&self) -> Result<Option<u64>, NixError> {
+        if !self.profile_path.exists() {
+            return Ok(None);
+        }
+        let target = std::fs::read_link(&self.profile_path)
+            .map_err(|e| NixError::Generic(format!("Cannot read profile symlink: {}", e)))?;
+        let filename = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if let Some(rest) = filename.strip_suffix("-link") {
+            if let Some((_, gen_str)) = rest.rsplit_once('-') {
+                if let Ok(gen) = gen_str.parse::<u64>() {
+                    return Ok(Some(gen));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn profile_exists(&self) -> bool {
+        self.profile_path.exists()
+    }
+
+    fn profile_path(&self) -> Result<PathBuf, NixError> {
+        Ok(self.profile_path.clone())
+    }
+
     fn check_availability(&self) -> Result<bool, NixError> {
         match Self::run_command(&["--version"], &[], None) {
             Ok(_) => Ok(true),
             Err(NixError::NotInstalled) => Ok(false),
             Err(e) => Err(e),
+        }
+    }
+
+    fn probe_experimental_features(&self) -> Result<ExperimentalFeatureStatus, NixError> {
+        let output = Command::new("nix")
+            .arg("eval")
+            .arg("nixpkgs#hello")
+            .output()
+            .map_err(|_| NixError::NotInstalled)?;
+
+        if output.status.success() {
+            return Ok(ExperimentalFeatureStatus::AllAvailable);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let nix_cmd_missing = stderr.contains("experimental feature 'nix-command'")
+            || stderr.contains("'nix-command' is not enabled");
+        let flakes_missing = stderr.contains("experimental feature 'flakes'")
+            || stderr.contains("'flakes' is not enabled");
+
+        if nix_cmd_missing && flakes_missing {
+            Ok(ExperimentalFeatureStatus::BothMissing)
+        } else if nix_cmd_missing {
+            Ok(ExperimentalFeatureStatus::NixCommandMissing)
+        } else if flakes_missing {
+            Ok(ExperimentalFeatureStatus::FlakesMissing)
+        } else if stderr.contains("cannot find attribute") || stderr.contains("does not exist") {
+            Ok(ExperimentalFeatureStatus::NixpkgsResolutionFailed)
+        } else {
+            Err(NixError::Generic(stderr.trim().to_string()))
         }
     }
 
@@ -334,8 +665,25 @@ impl NixAdapter for RealNixAdapter {
             &[],
             Some(package),
         )?;
+        let store_paths = json_store_paths(&raw_json);
+        if store_paths.is_empty() {
+            let all_strings = extract_json_strings(&raw_json);
+            let has_drv = all_strings.iter().any(|s| s.ends_with(".drv"));
+            if has_drv {
+                return Err(NixError::Generic(format!(
+                    "Nix build returned only derivation paths for '{}'. \
+                     Expected at least one realized output path, but all paths ended in .drv.",
+                    package
+                )));
+            }
+            return Err(NixError::Generic(format!(
+                "Nix build returned no output paths for '{}'. \
+                 Expected at least one realized output store path.",
+                package
+            )));
+        }
         let mut outputs = Vec::new();
-        for path in json_store_paths(&raw_json) {
+        for path in store_paths {
             outputs.push(BuildOutputPath {
                 output_name: if outputs.is_empty() {
                     "out".to_string()
@@ -394,6 +742,11 @@ impl NixAdapter for RealNixAdapter {
 pub struct MockNixAdapter {
     pub installed: bool,
     pub installed_packages: std::sync::Mutex<Vec<String>>,
+    pub nix_command_enabled: bool,
+    pub flakes_enabled: bool,
+    pub nixpkgs_accessible: bool,
+    pub generation_counter: std::sync::atomic::AtomicU64,
+    pub profile_list_json_override: std::sync::Mutex<Option<String>>,
 }
 
 impl MockNixAdapter {
@@ -401,7 +754,22 @@ impl MockNixAdapter {
         Self {
             installed,
             installed_packages: std::sync::Mutex::new(Vec::new()),
+            nix_command_enabled: true,
+            flakes_enabled: true,
+            nixpkgs_accessible: true,
+            generation_counter: std::sync::atomic::AtomicU64::new(1),
+            profile_list_json_override: std::sync::Mutex::new(None),
         }
+    }
+
+    pub fn increment_generation(&self) -> u64 {
+        self.generation_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn set_profile_list_json_override(&self, json: Option<String>) {
+        *self.profile_list_json_override.lock().unwrap() = json;
     }
 
     fn ensure_available_package(&self, package: &str) -> Result<(), NixError> {
@@ -419,12 +787,51 @@ impl MockNixAdapter {
 }
 
 impl NixAdapter for MockNixAdapter {
+    fn profile_generation(&self) -> Result<Option<u64>, NixError> {
+        if !self.installed {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.generation_counter
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+
+    fn profile_exists(&self) -> bool {
+        self.installed
+    }
+
+    fn profile_path(&self) -> Result<PathBuf, NixError> {
+        if !self.installed {
+            return Err(NixError::NotInstalled);
+        }
+        Ok(PathBuf::from("/tmp/root-mock-profile"))
+    }
     fn check_availability(&self) -> Result<bool, NixError> {
         if self.installed {
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    fn probe_experimental_features(&self) -> Result<ExperimentalFeatureStatus, NixError> {
+        if !self.installed {
+            return Ok(ExperimentalFeatureStatus::NixNotAvailable);
+        }
+        if !self.nix_command_enabled && !self.flakes_enabled {
+            return Ok(ExperimentalFeatureStatus::BothMissing);
+        }
+        if !self.nix_command_enabled {
+            return Ok(ExperimentalFeatureStatus::NixCommandMissing);
+        }
+        if !self.flakes_enabled {
+            return Ok(ExperimentalFeatureStatus::FlakesMissing);
+        }
+        if !self.nixpkgs_accessible {
+            return Ok(ExperimentalFeatureStatus::NixpkgsResolutionFailed);
+        }
+        Ok(ExperimentalFeatureStatus::AllAvailable)
     }
 
     fn search(&self, package: &str) -> Result<String, NixError> {
@@ -438,6 +845,7 @@ impl NixAdapter for MockNixAdapter {
             .lock()
             .unwrap()
             .push(package.to_string());
+        self.increment_generation();
         Ok(())
     }
 
@@ -447,6 +855,7 @@ impl NixAdapter for MockNixAdapter {
             .lock()
             .unwrap()
             .push(installable.to_string());
+        self.increment_generation();
         Ok(())
     }
 
@@ -472,12 +881,19 @@ impl NixAdapter for MockNixAdapter {
         }
         let mut pkgs = self.installed_packages.lock().unwrap();
         pkgs.retain(|p| p != package_or_index && package_from_installable(p) != package_or_index);
+        self.increment_generation();
         Ok(())
     }
 
     fn profile_list_json(&self) -> Result<String, NixError> {
         if !self.installed {
             return Err(NixError::NotInstalled);
+        }
+        {
+            let override_guard = self.profile_list_json_override.lock().unwrap();
+            if let Some(ref override_json) = *override_guard {
+                return Ok(override_json.clone());
+            }
         }
         let pkgs = self.installed_packages.lock().unwrap();
         let entries = pkgs
@@ -782,18 +1198,232 @@ fn sanitize_store_name(value: &str) -> String {
 mod tests {
     use super::*;
 
+    // ─── Error Normalization Tests ───────────────────────────────────────
+
     #[test]
-    fn test_error_normalization() {
+    fn test_normalize_platform_missing() {
+        let err = RealNixAdapter::normalize_error(
+            "error: attribute 'aarch64-darwin' missing from derivation 'xxx'",
+            "poppler",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::PlatformMissing("poppler".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_not_found() {
+        let err =
+            RealNixAdapter::normalize_error("error: no outputs found", "missing_pkg").unwrap_err();
+        assert_eq!(err, NixError::NotFound("missing_pkg".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_flakes_disabled() {
+        let err = RealNixAdapter::normalize_error(
+            "error: experimental feature 'flakes' is not enabled\n\
+             add '--extra-experimental-features flakes' if you want to use it",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::FlakesDisabled);
+    }
+
+    #[test]
+    fn test_normalize_nix_command_disabled() {
+        let err = RealNixAdapter::normalize_error(
+            "error: experimental feature 'nix-command' is not enabled",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::NixCommandDisabled);
+    }
+
+    #[test]
+    fn test_normalize_nix_command_preferred_over_flakes() {
+        // When both features are mentioned, nix-command check runs second
+        let err = RealNixAdapter::normalize_error(
+            "error: experimental feature 'nix-command' is not enabled",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::NixCommandDisabled);
+    }
+
+    #[test]
+    fn test_normalize_nixpkgs_unreachable_connection_refused() {
+        let err = RealNixAdapter::normalize_error(
+            "error: cannot connect to daemon at socket\nConnection refused",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::NixpkgsUnavailable);
+    }
+
+    #[test]
+    fn test_normalize_nixpkgs_unreachable_dns_failure() {
+        let err = RealNixAdapter::normalize_error(
+            "error: Temporary failure in name resolution",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::NixpkgsUnavailable);
+    }
+
+    #[test]
+    fn test_normalize_nixpkgs_unreachable_network_unreachable() {
+        let err =
+            RealNixAdapter::normalize_error("error: Network is unreachable", "ffmpeg").unwrap_err();
+        assert_eq!(err, NixError::NixpkgsUnavailable);
+    }
+
+    #[test]
+    fn test_normalize_attribute_missing() {
+        let err = RealNixAdapter::normalize_error(
+            "error: attribute 'ffmpeg' in selection path 'nixpkgs#ffmpeg' not found",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::AttributeMissing("ffmpeg".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_attribute_does_not_exist() {
+        let err = RealNixAdapter::normalize_error("error: attribute 'foo' does not exist", "foo")
+            .unwrap_err();
+        assert_eq!(err, NixError::AttributeMissing("foo".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_profile_locked() {
+        let err = RealNixAdapter::normalize_error(
+            "error: opening lock file '/nix/var/nix/profiles/default.lock'",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::ProfileLocked);
+    }
+
+    #[test]
+    fn test_normalize_profile_busy() {
+        let err = RealNixAdapter::normalize_error(
+            "error: profile '/nix/var/nix/profiles/per-user/root/profile' is busy",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::ProfileLocked);
+    }
+
+    #[test]
+    fn test_normalize_symlink_conflict_reading_symlink() {
+        let err = RealNixAdapter::normalize_error(
+            "error: reading symbolic link '/nix/var/nix/profiles/default': No such file or directory",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::ProfileSymlinkConflict);
+    }
+
+    #[test]
+    fn test_normalize_symlink_conflict_invalid_argument() {
+        let err = RealNixAdapter::normalize_error("error: Invalid argument", "ffmpeg").unwrap_err();
+        assert_eq!(err, NixError::ProfileSymlinkConflict);
+    }
+
+    #[test]
+    fn test_normalize_symlink_conflict_explicit() {
+        let err = RealNixAdapter::normalize_error("error: symlink conflict in profile", "ffmpeg")
+            .unwrap_err();
+        assert_eq!(err, NixError::ProfileSymlinkConflict);
+    }
+
+    #[test]
+    fn test_normalize_permission_denied() {
+        let err =
+            RealNixAdapter::normalize_error("error: Permission denied", "ffmpeg").unwrap_err();
+        assert_eq!(err, NixError::PermissionDenied);
+    }
+
+    #[test]
+    fn test_normalize_permission_denied_not_writable() {
+        let err =
+            RealNixAdapter::normalize_error("error: path '/nix/store' is not writable", "ffmpeg")
+                .unwrap_err();
+        assert_eq!(err, NixError::PermissionDenied);
+    }
+
+    #[test]
+    fn test_normalize_permission_denied_could_not_open() {
+        let err = RealNixAdapter::normalize_error(
+            "error: could not open profile '/nix/var/nix/profiles/default'",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::PermissionDenied);
+    }
+
+    #[test]
+    fn test_normalize_store_path_not_realized() {
+        let err = RealNixAdapter::normalize_error(
+            "error: store path '/nix/store/abc-ffmpeg-8.1' does not exist",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::StorePathNotRealized("ffmpeg".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_derivation_path_as_output() {
+        let err = RealNixAdapter::normalize_error(
+            "error: path '/nix/store/abc-ffmpeg-8.1.drv' is not an output path",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(err, NixError::DerivationPathAsOutput("ffmpeg".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_fallback_generic() {
+        let err = RealNixAdapter::normalize_error(
+            "error: some completely unexpected error happened",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            NixError::Generic("error: some completely unexpected error happened".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_fallback_preserves_raw_stderr() {
+        let err = RealNixAdapter::normalize_error(
+            "error: some random nix failure\nwith multiple lines",
+            "ffmpeg",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.raw_stderr(),
+            Some("error: some random nix failure\nwith multiple lines")
+        );
+    }
+
+    #[test]
+    fn test_normalize_typed_variants_have_no_raw_stderr() {
         let err = RealNixAdapter::normalize_error(
             "error: attribute 'aarch64-darwin' missing from derivation",
             "poppler",
         )
         .unwrap_err();
-        assert_eq!(err, NixError::PlatformMissing("poppler".to_string()));
+        assert_eq!(err.raw_stderr(), None);
 
-        let err2 =
-            RealNixAdapter::normalize_error("error: no outputs found", "missing_pkg").unwrap_err();
-        assert_eq!(err2, NixError::NotFound("missing_pkg".to_string()));
+        let err2 = RealNixAdapter::normalize_error("error: no outputs found", "pkg").unwrap_err();
+        assert_eq!(err2.raw_stderr(), None);
+    }
+
+    #[test]
+    fn test_normalize_empty_stderr() {
+        let err = RealNixAdapter::normalize_error("", "ffmpeg").unwrap_err();
+        assert_eq!(err, NixError::Generic(String::new()));
     }
 
     #[test]
@@ -945,5 +1575,260 @@ mod tests {
         for p in &paths {
             assert!(!p.ends_with(".drv"));
         }
+    }
+
+    #[test]
+    fn test_json_store_paths_returns_empty_when_all_are_drv() {
+        let json = r#"/nix/store/abc-ffmpeg-8.1.drv"#;
+        let paths = json_store_paths(json);
+        assert!(
+            paths.is_empty(),
+            "expected no output paths, got {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn test_json_store_paths_only_drv_in_json_objects() {
+        let json = r#"{"drvPath":"/nix/store/abc-pkg.drv","outputs":{}}"#;
+        let paths = json_store_paths(json);
+        assert!(
+            paths.is_empty(),
+            "expected no output paths, got {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_nix_not_installed() {
+        let mock = MockNixAdapter::new(false);
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::NixNotAvailable
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_all_available() {
+        let mock = MockNixAdapter::new(true);
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::AllAvailable
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_nix_command_missing() {
+        let mut mock = MockNixAdapter::new(true);
+        mock.nix_command_enabled = false;
+        mock.flakes_enabled = true;
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::NixCommandMissing
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_flakes_missing() {
+        let mut mock = MockNixAdapter::new(true);
+        mock.nix_command_enabled = true;
+        mock.flakes_enabled = false;
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::FlakesMissing
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_both_missing() {
+        let mut mock = MockNixAdapter::new(true);
+        mock.nix_command_enabled = false;
+        mock.flakes_enabled = false;
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::BothMissing
+        );
+    }
+
+    #[test]
+    fn test_mock_probe_nixpkgs_resolution_failed() {
+        let mut mock = MockNixAdapter::new(true);
+        mock.nix_command_enabled = true;
+        mock.flakes_enabled = true;
+        mock.nixpkgs_accessible = false;
+        assert_eq!(
+            mock.probe_experimental_features().unwrap(),
+            ExperimentalFeatureStatus::NixpkgsResolutionFailed
+        );
+    }
+
+    // ─── Profile Validation Tests ───────────────────────────────────────
+
+    #[test]
+    fn test_mock_profile_generation_tracking() {
+        let mock = MockNixAdapter::new(true);
+        assert_eq!(mock.profile_generation().unwrap(), Some(1));
+
+        mock.install("ripgrep").unwrap();
+        assert_eq!(mock.profile_generation().unwrap(), Some(2));
+
+        mock.remove("ripgrep").unwrap();
+        assert_eq!(mock.profile_generation().unwrap(), Some(3));
+    }
+
+    #[test]
+    fn test_mock_profile_generation_not_installed() {
+        let mock = MockNixAdapter::new(false);
+        assert_eq!(mock.profile_generation().unwrap(), None);
+    }
+
+    #[test]
+    fn test_mock_profile_exists() {
+        let mock = MockNixAdapter::new(true);
+        assert!(mock.profile_exists());
+
+        let mock2 = MockNixAdapter::new(false);
+        assert!(!mock2.profile_exists());
+    }
+
+    #[test]
+    fn test_mock_validate_mutation_success() {
+        let mock = MockNixAdapter::new(true);
+        let before = mock.profile_generation().unwrap();
+        mock.install("ripgrep").unwrap();
+
+        // Create mock binary so binary check passes
+        std::fs::create_dir_all("/tmp/root-mock-profile/bin").ok();
+        let _ = std::fs::write("/tmp/root-mock-profile/bin/rg", "mock binary content");
+
+        let mock_path = mock_store_path("ripgrep");
+        let result = mock
+            .validate_profile_mutation(before, &["ripgrep"], &["rg"], &[&mock_path])
+            .unwrap();
+
+        assert!(result.profile_exists);
+        assert!(result.generation_changed);
+        assert_eq!(result.generation_before, Some(1));
+        assert_eq!(result.generation_after, Some(2));
+        assert!(result.expected_packages_present);
+        assert!(result.missing_output_paths.is_empty());
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_mock_validate_mutation_fails_on_missing_output_path() {
+        let mock = MockNixAdapter::new(true);
+        let before = mock.profile_generation().unwrap();
+        mock.install("ripgrep").unwrap();
+
+        // Override profile list json to remove the expected path
+        mock.set_profile_list_json_override(Some(r#"[{"index":0,"attrPath":"ripgrep","originalUrl":"flake:nixpkgs","installable":"nixpkgs#ripgrep","storePaths":["/nix/store/abc-other-pkg"]}]"#.to_string()));
+
+        let result = mock
+            .validate_profile_mutation(
+                before,
+                &["ripgrep"],
+                &[],
+                &["/nix/store/expected-missing-path"],
+            )
+            .unwrap();
+
+        assert!(result.profile_exists);
+        assert!(!result.expected_packages_present);
+        assert!(!result.missing_output_paths.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("does not contain expected store path")));
+    }
+
+    #[test]
+    fn test_mock_validate_mutation_rejects_drv_path() {
+        let mock = MockNixAdapter::new(true);
+        let before = mock.profile_generation().unwrap();
+        mock.install("ripgrep").unwrap();
+
+        let result = mock
+            .validate_profile_mutation(before, &["ripgrep"], &[], &["/nix/store/abc-ripgrep.drv"])
+            .unwrap();
+
+        assert!(!result.drv_paths_found.is_empty());
+        assert!(!result.expected_packages_present);
+        assert!(result.errors.iter().any(|e| e.contains(".drv path")));
+    }
+
+    #[test]
+    fn test_mock_validate_mutation_no_profile() {
+        let mock = MockNixAdapter::new(false);
+        let result = mock.validate_profile_mutation(None, &[], &[], &[]).unwrap();
+
+        assert!(!result.profile_exists);
+        assert_eq!(result.generation_before, None);
+        assert_eq!(result.generation_after, None);
+        assert!(!result.generation_changed);
+        assert!(result.expected_packages_present);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_mock_validate_uninstalled_fails_gracefully() {
+        let mock = MockNixAdapter::new(false);
+        let result = mock
+            .validate_profile_mutation(
+                Some(5),
+                &["missing-pkg"],
+                &["binary"],
+                &["/nix/store/missing-path"],
+            )
+            .unwrap();
+
+        assert!(!result.profile_exists);
+        assert_eq!(result.generation_before, Some(5));
+        assert_eq!(result.generation_after, None);
+        assert!(!result.generation_changed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Failed to list profile")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Cannot determine profile path")));
+    }
+
+    #[test]
+    fn test_mock_validate_generation_unchanged() {
+        let mock = MockNixAdapter::new(true);
+        // Don't mutate -- generation stays the same
+        let before = mock.profile_generation().unwrap();
+
+        let mock_path = mock_store_path("ripgrep");
+        // Override profile list json so it contains the path
+        mock.set_profile_list_json_override(Some(
+            format!(
+                r#"[{{"index":0,"attrPath":"ripgrep","originalUrl":"flake:nixpkgs","installable":"nixpkgs#ripgrep","storePaths":["{}"]}}]"#,
+                mock_path
+            )
+        ));
+
+        let result = mock
+            .validate_profile_mutation(before, &["ripgrep"], &[], &[&mock_path])
+            .unwrap();
+
+        assert!(result.profile_exists);
+        assert!(!result.generation_changed);
+        assert!(result.expected_packages_present);
+    }
+
+    #[test]
+    fn test_mock_validate_generation_incremented_on_install() {
+        let mock = MockNixAdapter::new(true);
+        let before = mock.profile_generation().unwrap();
+        assert_eq!(before, Some(1));
+        mock.install("ripgrep").unwrap();
+
+        let after = mock.profile_generation().unwrap();
+        assert_eq!(after, Some(2));
+        assert_ne!(before, after);
     }
 }

@@ -78,6 +78,58 @@ pub fn run_diagnostics(adapter: &impl NixAdapter) -> Result<DoctorReport> {
         }
     }
 
+    // 1b. Probe experimental features (only if Nix is installed)
+    if report.nix_installed {
+        match adapter.probe_experimental_features() {
+            Ok(root_nix::ExperimentalFeatureStatus::AllAvailable) => {}
+            Ok(root_nix::ExperimentalFeatureStatus::NixNotAvailable) => {
+                report.nix_installed = false;
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description: "Nix is not installed or not available on PATH.\n\nRoot uses Nix to build packages from source in isolated environments.\nNix provides reproducible, deterministic builds that Root pins in its lockfile."
+                        .to_string(),
+                    suggestion:
+                        "Install Nix with: root init --install-nix\nOr install manually from:\n  https://nixos.org/download/\n\nAfter installing, run: root doctor"
+                            .to_string(),
+                });
+            }
+            Ok(root_nix::ExperimentalFeatureStatus::NixCommandMissing)
+            | Ok(root_nix::ExperimentalFeatureStatus::FlakesMissing)
+            | Ok(root_nix::ExperimentalFeatureStatus::BothMissing) => {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description:
+                        "Nix is installed, but required experimental features are not enabled.\n\nRoot requires:\n  nix-command\n  flakes\n\nYou can enable them by adding this to ~/.config/nix/nix.conf:\n\n  experimental-features = nix-command flakes\n\nThen run:\n  root doctor".to_string(),
+                    suggestion:
+                        "Add this to ~/.config/nix/nix.conf:\n  experimental-features = nix-command flakes\n\nThen run: root doctor".to_string(),
+                });
+            }
+            Ok(root_nix::ExperimentalFeatureStatus::NixpkgsResolutionFailed) => {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description:
+                        "Nix and experimental features are available, but nixpkgs could not be resolved.\n\nThis may indicate a network issue, a missing nixpkgs channel, or a problem with your Nix installation."
+                            .to_string(),
+                    suggestion:
+                        "Run 'nix-channel --update' and try 'root doctor' again, or check your network connection.\nIf the issue persists, try: nix eval nixpkgs#hello".to_string(),
+                });
+            }
+            Err(e) => {
+                report.issues.push(DoctorIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Nix".to_string(),
+                    description: format!("Failed to probe Nix experimental features: {}", e),
+                    suggestion:
+                        "Run `nix eval nixpkgs#hello` to diagnose the issue, then run `root doctor` again."
+                            .to_string(),
+                });
+            }
+        }
+    }
+
     // 2. Check Root Directory Status
     let root_dir_res = get_root_dir();
     let mut has_root_dir = false;
@@ -830,5 +882,71 @@ mod tests {
             issue.category == "Config"
                 && issue.description.contains("not a concrete pinned revision")
         }));
+    }
+
+    #[test]
+    fn test_probe_all_available() {
+        let (_temp_home, _guard) = setup_test_home("test_probe_all_available");
+        let mut adapter = MockNixAdapter::new(true);
+        adapter.nix_command_enabled = true;
+        adapter.flakes_enabled = true;
+        adapter.nixpkgs_accessible = true;
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.nix_installed);
+        assert!(!report
+            .issues
+            .iter()
+            .any(|i| i.category == "Nix" && i.description.contains("experimental features")));
+    }
+
+    #[test]
+    fn test_probe_nix_command_missing() {
+        let (_temp_home, _guard) = setup_test_home("test_probe_nix_command_missing");
+        let mut adapter = MockNixAdapter::new(true);
+        adapter.nix_command_enabled = false;
+        adapter.flakes_enabled = true;
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.nix_installed);
+        let nix_issue = report.issues.iter().find(|i| i.category == "Nix").unwrap();
+        assert!(nix_issue.description.contains("experimental features"));
+    }
+
+    #[test]
+    fn test_probe_flakes_missing() {
+        let (_temp_home, _guard) = setup_test_home("test_probe_flakes_missing");
+        let mut adapter = MockNixAdapter::new(true);
+        adapter.nix_command_enabled = true;
+        adapter.flakes_enabled = false;
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.nix_installed);
+        let nix_issue = report.issues.iter().find(|i| i.category == "Nix").unwrap();
+        assert!(nix_issue.description.contains("experimental features"));
+    }
+
+    #[test]
+    fn test_probe_both_missing() {
+        let (_temp_home, _guard) = setup_test_home("test_probe_both_missing");
+        let mut adapter = MockNixAdapter::new(true);
+        adapter.nix_command_enabled = false;
+        adapter.flakes_enabled = false;
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.nix_installed);
+        let nix_issue = report.issues.iter().find(|i| i.category == "Nix").unwrap();
+        assert!(nix_issue.description.contains("experimental features"));
+    }
+
+    #[test]
+    fn test_probe_nixpkgs_resolution_failed() {
+        let (_temp_home, _guard) = setup_test_home("test_probe_nixpkgs_resolution_failed");
+        let mut adapter = MockNixAdapter::new(true);
+        adapter.nix_command_enabled = true;
+        adapter.flakes_enabled = true;
+        adapter.nixpkgs_accessible = false;
+        let report = run_diagnostics(&adapter).unwrap();
+        assert!(report.nix_installed);
+        let nix_issue = report.issues.iter().find(|i| i.category == "Nix").unwrap();
+        assert!(nix_issue
+            .description
+            .contains("nixpkgs could not be resolved"));
     }
 }

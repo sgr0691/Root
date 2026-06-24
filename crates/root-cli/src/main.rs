@@ -27,6 +27,9 @@ enum Commands {
         /// Install Nix automatically if not detected
         #[arg(long)]
         install_nix: bool,
+        /// Skip confirmation prompts (use with --install-nix)
+        #[arg(long)]
+        yes: bool,
     },
     /// Show the curated package catalog
     Catalog,
@@ -145,12 +148,21 @@ enum SandboxSubcommands {
         /// Container image to use (default: ubuntu:latest)
         #[arg(long, value_name = "IMAGE")]
         image: Option<String>,
+        /// Memory limit (default: 2g)
+        #[arg(long, value_name = "MEMORY")]
+        memory: Option<String>,
+        /// CPU limit (default: 2.0)
+        #[arg(long, value_name = "CPUS")]
+        cpus: Option<String>,
     },
     /// Run a command inside a sandbox
     Run {
         /// Sandbox ID or name
         #[arg(value_name = "ID")]
         id: String,
+        /// Timeout in seconds (default: 300)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
         #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
         command: Vec<std::ffi::OsString>,
     },
@@ -168,19 +180,41 @@ enum SandboxSubcommands {
 struct GenericOutput {
     success: bool,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_stderr: Option<String>,
 }
 
 fn print_json<T: Serialize>(output: &T) {
     println!("{}", serde_json::to_string_pretty(output).unwrap());
 }
 
+fn json_error_output(e: &anyhow::Error) -> GenericOutput {
+    let raw_stderr = e
+        .downcast_ref::<root_nix::NixError>()
+        .and_then(|ne| ne.raw_stderr())
+        .map(|s| s.to_string());
+    GenericOutput {
+        success: false,
+        message: format!("{}", e),
+        raw_stderr,
+    }
+}
+
 fn exit_code_for_error(e: &anyhow::Error) -> i32 {
     if let Some(nix_err) = e.downcast_ref::<root_nix::NixError>() {
         return match nix_err {
             root_nix::NixError::NotInstalled => 7,
-            root_nix::NixError::NotFound(_) => 3,
+            root_nix::NixError::NotFound(_) | root_nix::NixError::AttributeMissing(_) => 3,
             root_nix::NixError::PlatformMissing(_) => 8,
-            root_nix::NixError::Generic(_) => 1,
+            root_nix::NixError::Generic(_) | root_nix::NixError::Internal(_) => 1,
+            root_nix::NixError::FlakesDisabled
+            | root_nix::NixError::NixCommandDisabled
+            | root_nix::NixError::NixpkgsUnavailable
+            | root_nix::NixError::ProfileLocked
+            | root_nix::NixError::ProfileSymlinkConflict
+            | root_nix::NixError::PermissionDenied
+            | root_nix::NixError::StorePathNotRealized(_)
+            | root_nix::NixError::DerivationPathAsOutput(_) => 1,
         };
     }
     let msg = format!("{:?}", e);
@@ -210,36 +244,7 @@ fn exit_code_for_error(e: &anyhow::Error) -> i32 {
 
 fn format_user_error(e: &anyhow::Error) -> String {
     if let Some(nix_err) = e.downcast_ref::<root_nix::NixError>() {
-        return match nix_err {
-            root_nix::NixError::NotInstalled => {
-                "Nix is not installed or not available on PATH.\n\n\
-                 To install Nix, run:  root init --install-nix\n\
-                 Or visit:            https://nixos.org/download/"
-                    .to_string()
-            }
-            root_nix::NixError::NotFound(pkg) => {
-                format!(
-                    "Package '{}' was not found in nixpkgs.\n\n\
-                     This may mean the package name is incorrect or the attribute\n\
-                     does not exist on your platform.",
-                    pkg
-                )
-            }
-            root_nix::NixError::PlatformMissing(pkg) => {
-                format!(
-                    "Package '{}' is not available for your platform.\n\n\
-                     Try a different package or check nixpkgs for alternatives:\n  nix search nixpkgs {}",
-                    pkg, pkg
-                )
-            }
-            root_nix::NixError::Generic(msg) => {
-                if msg.contains("error:") || msg.contains("warning:") || msg.contains("access") {
-                    format!("Nix operation failed.\n\nDetails: {}", msg)
-                } else {
-                    format!("Nix operation failed: {}", msg)
-                }
-            }
-        };
+        return format!("{}", nix_err);
     }
     let msg = format!("{}", e);
     if msg.contains("Policy denied") {
@@ -300,10 +305,7 @@ fn handle_structured<T: Serialize>(
         Err(e) => {
             let code = exit_code_for_error(&e);
             if json {
-                print_json(&GenericOutput {
-                    success: false,
-                    message: format!("{}", e),
-                });
+                print_json(&json_error_output(&e));
             } else {
                 eprintln!("Error: {}", format_user_error(&e));
             }
@@ -324,7 +326,7 @@ fn main() {
     let sandbox_provider = RealSandboxProvider::new();
 
     match cli.command {
-        Commands::Init { install_nix } => {
+        Commands::Init { install_nix, yes } => {
             let report = handle_structured(cli.json, root_core::init(&adapter), |r| {
                 let mut msg = String::from("Root initialized.\n");
                 msg.push_str(&format!("\n✓ Root directory created at {}", r.root_dir));
@@ -359,7 +361,7 @@ fn main() {
                         if !cli.json {
                             println!("Installing Nix...");
                         }
-                        match root_core::install_nix() {
+                        match root_core::install_nix(yes) {
                             Ok(()) => {
                                 report.nix_detected = true;
                                 if !cli.json {
@@ -372,6 +374,7 @@ fn main() {
                                     print_json(&GenericOutput {
                                         success: false,
                                         message: format!("Failed to install Nix: {:?}", e),
+                                        raw_stderr: None,
                                     });
                                 } else {
                                     eprintln!("Error installing Nix: {}", e);
@@ -528,10 +531,7 @@ fn main() {
             Err(e) => {
                 let code = exit_code_for_error(&e);
                 if cli.json {
-                    print_json(&GenericOutput {
-                        success: false,
-                        message: format!("{:?}", e),
-                    });
+                    print_json(&json_error_output(&e));
                 } else {
                     eprintln!("Error: {}", format_user_error(&e));
                 }
@@ -634,10 +634,7 @@ fn main() {
             Err(e) => {
                 let code = exit_code_for_error(&e);
                 if cli.json {
-                    print_json(&GenericOutput {
-                        success: false,
-                        message: format!("{:?}", e),
-                    });
+                    print_json(&json_error_output(&e));
                 } else {
                     eprintln!("Error: {}", format_user_error(&e));
                 }
@@ -661,6 +658,7 @@ fn main() {
                     print_json(&GenericOutput {
                         success: false,
                         message: "Currently only `root rollback --last` is supported".into(),
+                        raw_stderr: None,
                     });
                 } else {
                     eprintln!("Error: Currently only `root rollback --last` is supported");
@@ -711,10 +709,7 @@ fn main() {
             Err(e) => {
                 let code = exit_code_for_error(&e);
                 if cli.json {
-                    print_json(&GenericOutput {
-                        success: false,
-                        message: format!("{:?}", e),
-                    });
+                    print_json(&json_error_output(&e));
                 } else {
                     eprintln!("Error running doctor: {}", format_user_error(&e));
                 }
@@ -774,10 +769,7 @@ fn main() {
                 Err(e) => {
                     let code = exit_code_for_error(&e);
                     if cli.json {
-                        print_json(&GenericOutput {
-                            success: false,
-                            message: format!("{:?}", e),
-                        });
+                        print_json(&json_error_output(&e));
                     } else {
                         eprintln!("Error running verification: {}", format_user_error(&e));
                     }
@@ -791,6 +783,7 @@ fn main() {
                     print_json(&GenericOutput {
                         success: false,
                         message: format!("Unsupported import source: {}", source),
+                        raw_stderr: None,
                     });
                 } else {
                     eprintln!("Error: Only 'brew' is supported as an import source currently.");
@@ -833,10 +826,7 @@ fn main() {
                 Err(e) => {
                     let code = exit_code_for_error(&e);
                     if cli.json {
-                        print_json(&GenericOutput {
-                            success: false,
-                            message: format!("{:?}", e),
-                        });
+                        print_json(&json_error_output(&e));
                     } else {
                         eprintln!("Error running brew import: {}", format_user_error(&e));
                     }
@@ -1004,26 +994,48 @@ fn main() {
             });
         }
         Commands::Sandbox { subcommand } => match subcommand {
-            SandboxSubcommands::Create { name, image } => {
+            SandboxSubcommands::Create {
+                name,
+                image,
+                memory,
+                cpus,
+            } => {
                 let _ = handle_structured(
                     cli.json,
-                    root_core::sandbox_create(&sandbox_provider, name.as_deref(), image.as_deref()),
+                    root_core::sandbox_create(
+                        &sandbox_provider,
+                        name.as_deref(),
+                        image.as_deref(),
+                        memory.as_deref(),
+                        cpus.as_deref(),
+                    ),
                     |r| {
-                        format!(
-                            "Created sandbox '{}' (id: {})\n  Image: {}\n  Status: {}",
-                            r.name, r.id, r.image, r.status
-                        )
+                        let mut msg = format!(
+                            "Created sandbox '{}' (id: {})\n  Image: {}\n  State: {}",
+                            r.name, r.id, r.image, r.state
+                        );
+                        if let Some(ref mem) = r.memory {
+                            msg.push_str(&format!("\n  Memory: {}", mem));
+                        }
+                        if let Some(ref cpus) = r.cpus {
+                            msg.push_str(&format!("\n  CPUs: {}", cpus));
+                        }
+                        msg
                     },
                 );
             }
-            SandboxSubcommands::Run { id, command } => {
+            SandboxSubcommands::Run {
+                id,
+                timeout,
+                command,
+            } => {
                 let cmd_strings: Vec<String> = command
                     .iter()
                     .map(|arg| arg.to_string_lossy().to_string())
                     .collect();
                 if let Some(report) = handle_structured(
                     cli.json,
-                    root_core::sandbox_run(&sandbox_provider, &id, &cmd_strings),
+                    root_core::sandbox_run(&sandbox_provider, &id, &cmd_strings, timeout),
                     |r| {
                         let mut output = String::new();
                         if !r.stdout.is_empty() {
@@ -1038,7 +1050,17 @@ fn main() {
                                 output.push('\n');
                             }
                         }
-                        output.push_str(&format!("Command exited with code {}.", r.exit_code));
+                        if r.timed_out == Some(true) {
+                            output.push_str(&format!(
+                                "Command timed out (exit code {}).",
+                                r.exit_code
+                            ));
+                        } else {
+                            output.push_str(&format!("Command exited with code {}.", r.exit_code));
+                        }
+                        if r.cleanup_attempted == Some(true) {
+                            output.push_str(" Cleanup was attempted.");
+                        }
                         output
                     },
                 ) {
@@ -1056,8 +1078,8 @@ fn main() {
                             let mut msg = format!("Root sandboxes ({}):\n", r.sandboxes.len());
                             for sb in &r.sandboxes {
                                 msg.push_str(&format!(
-                                    "  {} (id: {}) [{}] image: {}\n",
-                                    sb.name, sb.id, sb.status, sb.image
+                                    "  {} (id: {}) [{:?}] image: {}\n",
+                                    sb.name, sb.id, sb.state, sb.image
                                 ));
                             }
                             msg
@@ -1146,7 +1168,7 @@ mod tests {
         let sb_create = Cli::try_parse_from(["root", "sandbox", "create", "test-sb"]).unwrap();
         match sb_create.command {
             Commands::Sandbox {
-                subcommand: SandboxSubcommands::Create { name, image },
+                subcommand: SandboxSubcommands::Create { name, image, .. },
             } => {
                 assert_eq!(name.as_deref(), Some("test-sb"));
                 assert!(image.is_none());
@@ -1154,16 +1176,73 @@ mod tests {
             other => panic!("expected sandbox create, got {:?}", other),
         }
 
+        let sb_create_with_resources = Cli::try_parse_from([
+            "root",
+            "sandbox",
+            "create",
+            "test-sb-2",
+            "--memory",
+            "4g",
+            "--cpus",
+            "4.0",
+        ])
+        .unwrap();
+        match sb_create_with_resources.command {
+            Commands::Sandbox {
+                subcommand:
+                    SandboxSubcommands::Create {
+                        name,
+                        image,
+                        memory,
+                        cpus,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("test-sb-2"));
+                assert!(image.is_none());
+                assert_eq!(memory.as_deref(), Some("4g"));
+                assert_eq!(cpus.as_deref(), Some("4.0"));
+            }
+            other => panic!("expected sandbox create with resources, got {:?}", other),
+        }
+
         let sb_run =
             Cli::try_parse_from(["root", "sandbox", "run", "my-sb", "--", "echo", "hi"]).unwrap();
         match sb_run.command {
             Commands::Sandbox {
-                subcommand: SandboxSubcommands::Run { id, command },
+                subcommand: SandboxSubcommands::Run { id, command, .. },
             } => {
                 assert_eq!(id, "my-sb");
                 assert_eq!(command.len(), 2);
             }
             other => panic!("expected sandbox run, got {:?}", other),
+        }
+
+        let sb_run_with_timeout = Cli::try_parse_from([
+            "root",
+            "sandbox",
+            "run",
+            "my-sb",
+            "--timeout",
+            "30",
+            "--",
+            "sleep",
+            "10",
+        ])
+        .unwrap();
+        match sb_run_with_timeout.command {
+            Commands::Sandbox {
+                subcommand:
+                    SandboxSubcommands::Run {
+                        id,
+                        timeout,
+                        command,
+                    },
+            } => {
+                assert_eq!(id, "my-sb");
+                assert_eq!(timeout, Some(30));
+                assert_eq!(command.len(), 2);
+            }
+            other => panic!("expected sandbox run with timeout, got {:?}", other),
         }
 
         let sb_list = Cli::try_parse_from(["root", "sandbox", "list"]).unwrap();
