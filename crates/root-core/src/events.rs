@@ -26,6 +26,7 @@ pub enum RootEventStatus {
     Completed,
     Failed,
     Verified,
+    Timeout,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,8 @@ pub struct RootEvent {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +74,7 @@ fn generate_event_id() -> String {
     format!("evt_{}_{:06}", datetime, micros)
 }
 
-fn now_iso() -> String {
+pub fn now_iso_for_event() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -141,7 +144,7 @@ pub fn create_event(
 ) -> RootEvent {
     RootEvent {
         id: generate_event_id(),
-        timestamp: now_iso(),
+        timestamp: now_iso_for_event(),
         event_type,
         command: command.to_string(),
         status,
@@ -155,6 +158,7 @@ pub fn create_event(
         finished_at: None,
         duration_ms: None,
         policy_decision: None,
+        sandbox_id: None,
     }
 }
 

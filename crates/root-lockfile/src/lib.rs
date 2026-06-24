@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 /// The Rootfile TOML format.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -592,8 +593,118 @@ pub fn compute_lock_content_hash(lock: &RootLock) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Error type for store path validation failures in Root lockfiles.
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum StorePathError {
+    #[error(
+        "Invalid Root lockfile: package {package} has a derivation path where an output path was expected.\n\nExpected output path:\n  /nix/store/...-{package_short}\n\nFound derivation path:\n  {found}"
+    )]
+    DrvInOutputField {
+        package: String,
+        package_short: String,
+        found: String,
+    },
+
+    #[error(
+        "Invalid Root lockfile: package {package} store path does not start with /nix/store/.\n\nFound:\n  {found}"
+    )]
+    OutputNotInStore { package: String, found: String },
+}
+
+fn shorten_package_name(name: &str) -> String {
+    // Strip output suffix like ".out", ".dev", etc. for display
+    name.rsplit_once('.')
+        .map(|(pkg, _)| pkg.to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Validate that all store paths in a `RootLockV2` follow the expected conventions.
+///
+/// Rules:
+/// - `drv_path` field must end in `.drv` or be `None`/empty
+/// - All `outputs` values must NOT end in `.drv`
+/// - All `store_paths` values must NOT end in `.drv`
+/// - `store_path` field must NOT end in `.drv`
+/// - Output paths must start with `/nix/store/`
+pub fn validate_store_paths(lock: &RootLockV2) -> Result<()> {
+    for package in &lock.packages {
+        // drv_path: must end in .drv or be None/empty
+        if let Some(ref drv_path) = package.drv_path {
+            if !drv_path.is_empty() && !drv_path.ends_with(".drv") {
+                anyhow::bail!(StorePathError::OutputNotInStore {
+                    package: format!("{}.drv_path", package.name),
+                    found: drv_path.clone(),
+                });
+            }
+        }
+
+        // outputs.*.store_path: must NOT end in .drv
+        for (output_name, output) in &package.outputs {
+            let path = &output.store_path;
+            if path.is_empty() {
+                continue;
+            }
+            if path.ends_with(".drv") {
+                anyhow::bail!(StorePathError::DrvInOutputField {
+                    package: format!("{}.{}", package.name, output_name),
+                    package_short: shorten_package_name(&package.name),
+                    found: path.clone(),
+                });
+            }
+            if !path.starts_with("/nix/store/") {
+                anyhow::bail!(StorePathError::OutputNotInStore {
+                    package: format!("{}.{}.store_path", package.name, output_name),
+                    found: path.clone(),
+                });
+            }
+        }
+
+        // store_paths.*: must NOT end in .drv
+        for (output_name, path) in &package.store_paths {
+            if path.is_empty() {
+                continue;
+            }
+            if path.ends_with(".drv") {
+                anyhow::bail!(StorePathError::DrvInOutputField {
+                    package: format!("{}.{}", package.name, output_name),
+                    package_short: shorten_package_name(&package.name),
+                    found: path.clone(),
+                });
+            }
+            if !path.starts_with("/nix/store/") {
+                anyhow::bail!(StorePathError::OutputNotInStore {
+                    package: format!("{}.store_paths.{}", package.name, output_name),
+                    found: path.clone(),
+                });
+            }
+        }
+
+        // store_path: must NOT end in .drv
+        if !package.store_path.is_empty() {
+            if package.store_path.ends_with(".drv") {
+                anyhow::bail!(StorePathError::DrvInOutputField {
+                    package: package.name.clone(),
+                    package_short: package.name.clone(),
+                    found: package.store_path.clone(),
+                });
+            }
+            if !package.store_path.starts_with("/nix/store/") {
+                anyhow::bail!(StorePathError::OutputNotInStore {
+                    package: format!("{}.store_path", package.name),
+                    found: package.store_path.clone(),
+                });
+            }
+        }
+
+        // binaries: no path validation needed, they're just binary names
+        // meta, content_hash, etc: not paths, skip
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -912,5 +1023,178 @@ mod tests {
             serialized, reserialized,
             "Rootfile serialization must be deterministic"
         );
+    }
+
+    // ── Store path validation tests ─────────────────────────────────────
+
+    fn make_valid_package() -> LockedPackageV2 {
+        LockedPackageV2 {
+            name: "ffmpeg".into(),
+            requested: "ffmpeg".into(),
+            version: "8.1".into(),
+            attribute: "ffmpeg".into(),
+            store_path: "/nix/store/abc123ffmpeg-ffmpeg-8.1".into(),
+            binaries: vec!["ffmpeg".into()],
+            installable: Some("nixpkgs#ffmpeg".into()),
+            drv_path: Some("/nix/store/drv456ffmpeg-ffmpeg-8.1.drv".into()),
+            outputs: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "out".into(),
+                    LockedPackageOutput {
+                        store_path: "/nix/store/abc123ffmpeg-ffmpeg-8.1".into(),
+                        content_hash: None,
+                        nar_hash: None,
+                        references: vec![],
+                    },
+                );
+                m
+            },
+            store_paths: {
+                let mut m = BTreeMap::new();
+                m.insert("out".into(), "/nix/store/abc123ffmpeg-ffmpeg-8.1".into());
+                m
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_store_paths_accepts_valid_lock() {
+        let lock = RootLockV2 {
+            packages: vec![make_valid_package()],
+            ..RootLockV2::default()
+        };
+        assert!(validate_store_paths(&lock).is_ok());
+    }
+
+    #[test]
+    fn test_validate_store_paths_rejects_drv_in_outputs() {
+        let mut pkg = make_valid_package();
+        pkg.outputs.insert(
+            "out".into(),
+            LockedPackageOutput {
+                store_path: "/nix/store/abc-ffmpeg-8.1.drv".into(),
+                content_hash: None,
+                nar_hash: None,
+                references: vec![],
+            },
+        );
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        let err = validate_store_paths(&lock).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("derivation path where an output path was expected"));
+        assert!(msg.contains("ffmpeg"));
+        assert!(msg.contains(".drv"));
+    }
+
+    #[test]
+    fn test_validate_store_paths_rejects_drv_in_store_paths() {
+        let mut pkg = make_valid_package();
+        pkg.store_paths
+            .insert("dev".into(), "/nix/store/abc-ffmpeg-dev.drv".into());
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        let err = validate_store_paths(&lock).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("derivation path"));
+    }
+
+    #[test]
+    fn test_validate_store_paths_rejects_drv_in_store_path() {
+        let mut pkg = make_valid_package();
+        pkg.store_path = "/nix/store/abc-ffmpeg-8.1.drv".into();
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        let err = validate_store_paths(&lock).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("derivation path where an output path was expected"));
+    }
+
+    #[test]
+    fn test_validate_store_paths_accepts_drv_in_drv_path() {
+        let mut pkg = make_valid_package();
+        pkg.drv_path = Some("/nix/store/abc-ffmpeg-8.1.drv".into());
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        assert!(validate_store_paths(&lock).is_ok());
+    }
+
+    #[test]
+    fn test_validate_store_paths_accepts_empty_drv_path() {
+        let mut pkg = make_valid_package();
+        pkg.drv_path = None;
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        assert!(validate_store_paths(&lock).is_ok());
+    }
+
+    #[test]
+    fn test_validate_store_paths_rejects_non_store_path() {
+        let mut pkg = make_valid_package();
+        pkg.outputs.insert(
+            "out".into(),
+            LockedPackageOutput {
+                store_path: "/tmp/some-local-path".into(),
+                content_hash: None,
+                nar_hash: None,
+                references: vec![],
+            },
+        );
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        let err = validate_store_paths(&lock).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("does not start with /nix/store/"));
+    }
+
+    #[test]
+    fn test_validate_store_paths_skips_empty_paths() {
+        let mut pkg = make_valid_package();
+        pkg.outputs.insert(
+            "dev".into(),
+            LockedPackageOutput {
+                store_path: "".into(),
+                content_hash: None,
+                nar_hash: None,
+                references: vec![],
+            },
+        );
+        pkg.store_paths.insert("dev".into(), "".into());
+        let lock = RootLockV2 {
+            packages: vec![pkg],
+            ..RootLockV2::default()
+        };
+        assert!(validate_store_paths(&lock).is_ok());
+    }
+
+    #[test]
+    fn test_validate_store_paths_multiple_packages() {
+        let mut pkg1 = make_valid_package();
+        pkg1.name = "good-pkg".into();
+        let mut pkg2 = make_valid_package();
+        pkg2.name = "bad-pkg".into();
+        pkg2.store_path = "/nix/store/bad-pkg.drv".into();
+        let lock = RootLockV2 {
+            packages: vec![pkg1, pkg2],
+            ..RootLockV2::default()
+        };
+        let err = validate_store_paths(&lock).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bad-pkg"));
+        assert!(msg.contains("derivation path where an output path was expected"));
     }
 }

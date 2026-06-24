@@ -5,6 +5,60 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-24
+
+### Added
+
+- **Sandbox lifecycle validation.** Sandboxes follow a strict state machine (Created → Running → Completed/Failed → Destroyed). Invalid transitions are rejected with clear errors. (Phase 2)
+- **Cleanup guarantees.** Destroy always attempts cleanup. Failed and timed-out runs trigger automatic cleanup. Stale sandboxes detectable via `root sandbox list`. (Phase 3)
+- **Resource limits.** `root sandbox create` accepts `--memory` (default 2g) and `--cpus` (default 2.0). Docker containers are created with these limits. (Phase 4)
+- **Timeout handling.** `root sandbox run` accepts `--timeout` (default 300s). Timed-out runs are killed, cleaned up, and recorded in the event ledger. (Phase 5)
+- **Sandbox validation.** Post-create validation verifies container exists and is reachable. Post-destroy validation verifies container is removed. (Phase 6)
+- **Event ledger integration.** Every sandbox action (create, run, timeout, failure, destroy, cleanup) is recorded with sandbox ID, timestamp, and result. (Phase 7)
+- **Sandbox error normalization.** Clear, actionable messages for Docker unavailable, image pull failure, container startup failure, timeout, resource limit exceeded, permission denied, and cleanup failure. (Phase 8)
+- **Sandbox audit.** Full subsystem audit at Docs/Sandbox/V0_2_3_SANDBOX_AUDIT.md. (Phase 1)
+- **Sandbox smoke tests.** New smoke test document at Docs/Release/V0_2_3_SANDBOX_SMOKE_TEST.md. (Phase 9)
+- **Sandbox documentation.** New reference document at Docs/Sandbox/V0_2_3_SANDBOX_NOTES.md. (Phase 10)
+- **30 new tests** covering lifecycle validation, cleanup, resource limits, timeout, validation, event recording, and error normalization (38 total in root-sandbox).
+
+### Changed
+
+- README updated for v0.2.3.
+- SandboxProvider trait updated with `create(memory, cpus)`, `run_command(timeout)`, `check_exists`, `check_reachable`.
+- SandboxInstance uses typed `SandboxState` enum instead of string status.
+- RootEvent gains `sandbox_id` field for sandbox operation tracking.
+
+### Fixed
+
+- Sandbox state transitions now validated — running a destroyed sandbox is rejected early.
+- Docker errors normalized into user-friendly messages.
+- Containers are validated after create and destroyed on validation failure.
+
+## [0.2.2] - 2026-06-23
+
+### Added
+
+- **Nix command audit.** Comprehensive catalog of all 12 nix subcommands Root uses, their expected outputs, failure modes, and error-handling gaps. Docs/Nix/V0_2_2_NIX_COMMAND_AUDIT.md. (Phase 1)
+- **Experimental feature probe.** `root doctor` now detects when `nix-command` or `flakes` are disabled and explains how to enable them. (Phase 2)
+- **Profile generation validation.** After every mutation (install, update, rollback, restore), Root validates the Nix profile generation changed and expected output paths are present. (Phase 3)
+- **Store path hardening.** Derivation paths (.drv) are strictly separated from output paths. Lockfile and snapshot validation rejects .drv paths in output fields before any mutation. (Phase 4)
+- **Error normalization.** All Nix failure modes produce clear, actionable messages without leaking raw Nix output. Covers 12+ failure modes. (Phase 5)
+- **Installer validation.** `root init --install-nix` now explains what will happen, requires explicit confirmation, detects platform, and runs post-install probe. (Phase 6)
+- **Nix reliability smoke tests.** New smoke test document at Docs/Release/V0_2_2_NIX_RELIABILITY_SMOKE_TEST.md. (Phase 7)
+- **Nix reliability notes.** New reference document at Docs/Nix/V0_2_2_NIX_RELIABILITY_NOTES.md. (Phase 8)
+- **24+ new tests** covering experimental feature detection, profile validation, store path validation, error normalization, and installer validation.
+
+### Changed
+
+- README updated for v0.2.2.
+- All Nix error handling produces normalized user-facing messages.
+
+### Fixed
+
+- `.drv` paths in lockfile output fields now rejected early with clear error.
+- Missing experimental features produce clear diagnostic instead of confusing Nix errors.
+- Installer explains actions before running and validates post-install state.
+
 ## [0.2.1] - 2026-06-22
 
 ### Performance
