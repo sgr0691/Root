@@ -1,4 +1,4 @@
-# Root v0.2.0
+# Root v0.2.1
 
 > A curated package manager for developer CLI tools, backed by Nix.
 
@@ -7,6 +7,28 @@ undo it — without needing to learn Nix.
 
 [![CI](https://github.com/sgr0691/Root/actions/workflows/ci.yml/badge.svg)](https://github.com/sgr0691/Root/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+## What v0.2.1 Changed
+
+v0.2.1 is the **Performance & Reliability** release:
+
+- **Faster search** — Query lowercased once instead of per-package (42×).
+  `SearchMatch` and `CatalogEntry` use `&'static` lifetime strings, eliminating
+  per-result heap allocations.
+- **Content-aware file I/O** — Lockfile writes skip disk I/O when serialized
+  output matches the existing file. `build_v2_lock` eliminates wasteful
+  v2→v1→v2 conversions.
+- **Bounded event history** — `root history --limit N` bounds in-memory event
+  retention with a fixed-size rolling buffer (no O(N) memory blowup for large
+  ledgers).
+- **Smarter status for empty states** — Nix profile check is skipped when
+  Rootfile and lockfile are both empty. Status stays entirely local.
+- **Graceful error handling** — Malformed event lines in `events.jsonl` are
+  skipped instead of failing. Status handles missing Rootfile, missing lockfile,
+  unavailable Nix, and missing profile without panicking.
+- **24 new tests** — Coverage for search, lockfile, history, status, plan, and
+  catalog. Plus a Nix-avoidance test suite ensuring core commands don't shell
+  out to Nix unnecessarily.
 
 ## What v0.2.0 Changed
 
@@ -318,7 +340,7 @@ contain the full deterministic lock state. The event ledger at
 `~/.root/events.jsonl` records every operation. Verification checks binaries
 from the Root-managed profile, not from PATH.
 
-## Limitations (v0.2.0)
+## Limitations (v0.2.1)
 
 - **Curated catalog only.** Root supports a curated catalog only — 42 packages
   across eleven categories. Arbitrary `root install <anything>` is not yet
@@ -349,7 +371,7 @@ from the Root-managed profile, not from PATH.
 
 ## Experimental Commands
 
-The CLI includes additional commands that are **not part of the v0.2.0 public
+The CLI includes additional commands that are **not part of the v0.2.1 public
 surface**. They may change, break, or be removed without notice:
 
 | Command | Status |
