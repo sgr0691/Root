@@ -5,6 +5,28 @@ All notable changes to Root are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-06-24
+
+### Added
+
+- **Restore audit.** Full restore subsystem audit at Docs/Restore/V0_2_4_RESTORE_AUDIT.md covering entry points, validation flow, Nix operations, mutation flow, event recording, rollback/recovery, drift detection, 13 failure modes, and 10 gaps. (Phase 1)
+- **Dry-run support.** `root restore root.lock --dry-run` reports the restore plan (will install, remove, keep, update) without mutating the Rootfile, root.lock, Nix profile, or event ledger. Supports human and JSON output. (Phase 2)
+- **Pre-restore validation.** Lockfile schema, store paths, platform compatibility, Nix availability, experimental features (nix-command, flakes), and Root profile existence are all validated before any mutation. `.drv` paths in outputs are rejected with clear errors. (Phase 3)
+- **Partial failure recovery.** If restore fails mid-operation, Root captures a pre-restore snapshot, preserves previous Rootfile/root.lock, and automatically rolls back the Nix profile. If recovery fails, clear instructions are provided for manual rollback. (Phase 4)
+- **Strengthened drift detection.** `root status` now detects missing output paths per package, `.drv` paths in lockfiles, and platform mismatches in addition to existing name-based drift checks. (Phase 5)
+- **Restore event ledger.** New `RestorePlanned` and `RestoreRecovered` event types, new `Planned` event status, and event fields for `failure_phase`, `installed_count`, `removed_count`, `kept_count`. Restore operations record detailed events at every stage. (Phase 6)
+- **Restore error normalization.** Clear, actionable error messages for all restore failure modes: invalid lockfile, incompatible platform, missing Nix, missing experimental features, `.drv` output paths, profile validation failure, partial restore failure, failed recovery, stale mutation lock, and permission denied. (Phase 7)
+- **Restore smoke tests.** New smoke test document at Docs/Release/V0_2_4_RESTORE_SMOKE_TEST.md covering clean restore, dry-run, invalid lockfile, partial failure, and drift detection scenarios. (Phase 8)
+- **Restore documentation.** New reference document at Docs/Restore/V0_2_4_RESTORE_NOTES.md. (Phase 9)
+
+### Changed
+
+- README updated for v0.2.4.
+- `RootEventType` gains `RestorePlanned` and `RestoreRecovered` variants.
+- `RootEventStatus` gains `Planned` variant.
+- `RootEvent` gains `failure_phase`, `installed_count`, `removed_count`, `kept_count` fields.
+- `RestoreReport` renamed conceptually — restore output now includes automatic rollback reporting on failure.
+
 ## [0.2.3] - 2026-06-24
 
 ### Added

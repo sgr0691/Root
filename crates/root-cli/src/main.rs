@@ -96,6 +96,9 @@ enum Commands {
         /// Lockfile to restore from. Defaults to ~/.root/root.lock
         #[arg(long, value_name = "PATH")]
         lock: Option<std::path::PathBuf>,
+        /// Show restore plan without mutating anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run a Rootfile task, workflow file, or command
     Run {
@@ -283,6 +286,30 @@ fn format_user_error(e: &anyhow::Error) -> String {
         "Another Root operation is in progress.\n\n\
          If no other terminal is running Root, delete the lock:\n  rm ~/.root/root.lockfile\nThen try again."
             .to_string()
+    } else if msg.contains("Restore validation failed") {
+        if msg.contains("Nix is not available") {
+            "Restore requires Nix, but Nix is not installed or not in PATH.\n\n\
+             Install Nix from https://nixos.org/download.html"
+                .to_string()
+        } else if msg.contains("experimental feature") {
+            msg
+        } else if msg.contains("does not match current platform") {
+            msg
+        } else if msg.contains("Root profile does not exist") {
+            format!("{}\n\nRun:  root init", msg)
+        } else if msg.contains(".drv path") {
+            format!(
+                "{}\n\n\
+                 The lockfile appears to be corrupted or from an incompatible source.\n\
+                 Run:  root lock\n\
+                 This will regenerate the lockfile with correct store paths.",
+                msg
+            )
+        } else {
+            msg
+        }
+    } else if msg.contains("Restore failed") {
+        msg
     } else {
         msg
     }
@@ -871,25 +898,51 @@ fn main() {
                 msg
             });
         }
-        Commands::Restore { lock } => {
-            let _ = handle_structured(
-                cli.json,
-                root_core::restore(&adapter, lock.as_deref()),
-                |r| {
-                    let mut msg = format!("Restored Root profile from {}.", r.lock_path);
-                    if !r.installed.is_empty() {
-                        msg.push_str(&format!("\nInstalled: {}.", r.installed.join(", ")));
-                    }
-                    if !r.removed.is_empty() {
-                        msg.push_str(&format!("\nRemoved: {}.", r.removed.join(", ")));
-                    }
-                    if !r.unchanged.is_empty() {
-                        msg.push_str(&format!("\nUnchanged: {}.", r.unchanged.join(", ")));
-                    }
-                    msg.push_str(&format!("\nSnapshot saved: {}", r.snapshot_id));
-                    msg
-                },
-            );
+        Commands::Restore { lock, dry_run } => {
+            if *dry_run {
+                let _ = handle_structured(
+                    cli.json,
+                    root_core::restore_dry_run(&adapter, lock.as_deref()),
+                    |r| {
+                        let mut msg = String::from("Restore plan\n");
+                        if !r.will_install.is_empty() {
+                            msg.push_str(&format!("\nWill install:\n  {}\n", r.will_install.join("\n  ")));
+                        }
+                        if !r.will_remove.is_empty() {
+                            msg.push_str(&format!("\nWill remove:\n  {}\n", r.will_remove.join("\n  ")));
+                        }
+                        if !r.will_keep.is_empty() {
+                            msg.push_str(&format!("\nWill keep:\n  {}\n", r.will_keep.join("\n  ")));
+                        }
+                        if !r.will_update.is_empty() {
+                            msg.push_str(&format!("\nWill update:\n  {}\n", r.will_update.join("\n  ")));
+                        }
+                        if r.will_install.is_empty() && r.will_remove.is_empty() && r.will_update.is_empty() {
+                            msg.push_str("\nNo changes needed.");
+                        }
+                        msg
+                    },
+                );
+            } else {
+                let _ = handle_structured(
+                    cli.json,
+                    root_core::restore(&adapter, lock.as_deref()),
+                    |r| {
+                        let mut msg = format!("Restored Root profile from {}.", r.lock_path);
+                        if !r.installed.is_empty() {
+                            msg.push_str(&format!("\nInstalled: {}.", r.installed.join(", ")));
+                        }
+                        if !r.removed.is_empty() {
+                            msg.push_str(&format!("\nRemoved: {}.", r.removed.join(", ")));
+                        }
+                        if !r.unchanged.is_empty() {
+                            msg.push_str(&format!("\nUnchanged: {}.", r.unchanged.join(", ")));
+                        }
+                        msg.push_str(&format!("\nSnapshot saved: {}", r.snapshot_id));
+                        msg
+                    },
+                );
+            }
         }
         Commands::Run { target, command } => {
             let request = if !command.is_empty() {
